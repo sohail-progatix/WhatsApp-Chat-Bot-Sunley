@@ -6,7 +6,7 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
   if (req.method !== "POST")    { res.status(405).json({ error: "Method not allowed" }); return; }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) { res.status(500).json({ error: "API key not configured on server." }); return; }
 
   const { pdfBase64, instruction, msgFormat } = req.body;
@@ -16,6 +16,7 @@ module.exports = async function handler(req, res) {
   }
 
   const prompt = `You are a WhatsApp message generator assistant.
+The user has provided a PDF document (as base64) and an instruction.
 Extract relevant information from the PDF and generate a clear, professional WhatsApp message.
 If a message format/template is provided, fill it in exactly using the correct values from the PDF.
 Output ONLY the final WhatsApp message — no commentary, no explanation, no markdown formatting.
@@ -23,31 +24,52 @@ If multiple messages are needed, separate them with "--- Message 1 ---", "--- Me
 
 Instruction: ${instruction}
 ${msgFormat ? `\nRequired message format to fill in:\n${msgFormat}\n` : ""}
+
+PDF Content (base64): ${pdfBase64}
+
 Generate the WhatsApp message now.`;
 
-  // Updated to latest working Gemini model
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
-
   try {
-    const geminiRes = await fetch(geminiUrl, {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://msg-bot-psi.vercel.app",
+        "X-Title": "WhatsApp PDF Message Generator"
+      },
       body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: "application/pdf", data: pdfBase64 } },
-            { text: prompt }
-          ]
-        }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 1024 }
+        model: "google/gemini-2.0-flash-exp:free",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: prompt
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:application/pdf;base64,${pdfBase64}`
+                }
+              }
+            ]
+          }
+        ],
+        max_tokens: 1024,
+        temperature: 0.2
       })
     });
 
-    const data = await geminiRes.json();
-    if (!geminiRes.ok) throw new Error(data.error?.message || "Gemini API error");
+    const data = await response.json();
 
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    if (!text) throw new Error("No response from Gemini.");
+    if (!response.ok) {
+      throw new Error(data.error?.message || "OpenRouter API error");
+    }
+
+    const text = data.choices?.[0]?.message?.content || "";
+    if (!text) throw new Error("No response received. Try again.");
 
     res.status(200).json({ text });
   } catch (err) {
