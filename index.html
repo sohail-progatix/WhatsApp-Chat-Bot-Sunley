@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>WhatsApp PDF Message Generator</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; }
+  input:focus, textarea:focus { border-color: #25D366 !important; box-shadow: 0 0 0 2px #25D36622 !important; outline: none; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+  @keyframes wapulse { 0%,80%,100%{opacity:0.3;transform:scale(0.8)} 40%{opacity:1;transform:scale(1)} }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  .msg-anim { animation: fadeIn 0.25s ease; }
+  .demo-btn { background: linear-gradient(135deg,#FF9800,#F44336); color:#fff; border:none; border-radius:8px; padding:12px 0; font-weight:700; font-size:14px; cursor:pointer; width:100%; letter-spacing:0.3px; transition:opacity 0.2s,transform 0.15s; }
+  .demo-btn:hover { opacity:0.92; transform:scale(1.01); }
+  .demo-btn:disabled { opacity:0.6; cursor:not-allowed; }
+  .real-btn { background:#25D366; color:#fff; border:none; border-radius:8px; padding:12px 0; font-weight:700; font-size:14px; cursor:pointer; width:100%; letter-spacing:0.3px; transition:background 0.2s; }
+  .real-btn:hover:not(:disabled) { background:#128C7E; }
+  .real-btn:disabled { background:#ccc; cursor:not-allowed; }
+  .copy-btn { background:none; border:none; cursor:pointer; font-size:11px; color:#888; padding:2px 6px; border-radius:4px; margin-left:4px; }
+  .copy-btn:hover { background:#f0f0f0; }
+  textarea { resize:vertical; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useCallback } = React;
+const ACCENT      = "#25D366";
+const ACCENT_DARK = "#128C7E";
+const WA_BG       = "#ECE5DD";
+const WA_BUBBLE   = "#DCF8C6";
+const WA_HEADER   = "#075E54";
+
+const DEMO_USER_MSG = `📎 PFI.pdf — BMJ Proforma Invoice\n📝 Instruction: Tt pls $79576\nSunley fab copy and msg`;
+const DEMO_BOT_MSG  = `BENEFICIARY NAME: PT BUKIT MURIA JAYA\n\nBENEFICIARY ADDRESS: JL KARAWANG SPOOR KEO TELUK JAMBE P O BOX 64 KW KARAWANG 41300 JAWA BARAT INDONESIA\n\nBENEFICIARY BANK NAME: PT BANK MANDIRI (PERSERO) TBK\n\nBENEFICIARY BANK ADDRESS: KARAWANG GRAND TARUMA. RUKO DHARMAWANGSA II KAV 08 NO. A3-A5 JL. TARUMANAGARA INTERCHANGE KARAWANG BARAT KARAWANG 41314 INDONESIA\n\nBENEFICIARY A/C NO: 1730002144278\n\nSWIFT CODE: BMRIIDJA\n\nINVOICE NO: 12022026-PMEL-R00\n\nPURPOSE: IMPORT OF GOODS\n\nAMOUNT USD: 79,576/-`;
+
+function getTime() { return new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }); }
+
+function LoadingDots() {
+  return (
+    <span style={{ display:"inline-flex", gap:3, alignItems:"center", marginRight:6 }}>
+      {[0,1,2].map(i => (
+        <span key={i} style={{ width:7, height:7, borderRadius:"50%", background:"#aaa", display:"inline-block", animation:`wapulse 1.2s ${i*0.2}s infinite` }}/>
+      ))}
+    </span>
+  );
+}
+
+function App() {
+  const [pdfFile, setPdfFile]   = useState(null);
+  const [pdfB64, setPdfB64]     = useState(null);
+  const [instruction, setInstr] = useState("");
+  const [msgFormat, setMsgFmt]  = useState("");
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading]   = useState(false);
+  const [demoLoading, setDemoL] = useState(false);
+  const [error, setError]       = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [copied, setCopied]     = useState(null);
+  const [isDemo, setIsDemo]     = useState(false);
+  const fileRef = useRef();
+  const chatRef = useRef();
+
+  const scrollBottom = () => setTimeout(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, 80);
+  const readPDF = file => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(file); });
+
+  const handleFile = useCallback(async file => {
+    if (!file || file.type !== "application/pdf") { setError("Please upload a valid PDF file."); return; }
+    setPdfFile(file); setError(""); setPdfB64(await readPDF(file));
+  }, []);
+
+  const onDrop = e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); };
+
+  const copyMsg = (text, idx) => {
+    const fb = () => { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); document.body.removeChild(t); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(fb); else fb();
+    setCopied(idx); setTimeout(() => setCopied(null), 1800);
+  };
+  const copyAll = () => copyMsg(messages.filter(m => m.role==="bot").map(m => m.text).join("\n\n"), "all");
+
+  const runDemo = () => {
+    setError(""); setMessages([]); setDemoL(true); setIsDemo(true);
+    setMessages([{ role:"user", text:DEMO_USER_MSG, time:getTime() }]);
+    scrollBottom();
+    setTimeout(() => { setMessages(prev => [...prev, { role:"bot", text:DEMO_BOT_MSG, time:getTime(), idx:1 }]); setDemoL(false); scrollBottom(); }, 2400);
+  };
+
+  const generate = async () => {
+    if (!pdfB64)             { setError("Please upload a PDF file."); return; }
+    if (!instruction.trim()) { setError("Please enter an instruction."); return; }
+    setError(""); setLoading(true); setIsDemo(false);
+    setMessages(prev => [...prev, { role:"user", time:getTime(), text:`📎 ${pdfFile.name}\n📝 Instruction: ${instruction}${msgFormat?`\n\n📋 Format:\n${msgFormat}`:""}` }]);
+    scrollBottom();
+    try {
+      // Key is never in this file — it lives securely on Vercel
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ pdfBase64: pdfB64, instruction, msgFormat })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Server error.");
+      const raw = data.text || "";
+      if (!raw) throw new Error("No response received. Try again.");
+      const parts = raw.split(/---\s*Message\s*\d+\s*---/i).map(s => s.trim()).filter(Boolean);
+      const botMsgs = parts.length > 1
+        ? parts.map((text,i) => ({ role:"bot", text, time:getTime(), idx:i+1 }))
+        : [{ role:"bot", text:raw.trim(), time:getTime(), idx:1 }];
+      setMessages(prev => [...prev, ...botMsgs]); scrollBottom();
+    } catch(err) {
+      setError(err.message || "Something went wrong."); setMessages(prev => prev.slice(0,-1));
+    } finally { setLoading(false); }
+  };
+
+  const botMsgs  = messages.filter(m => m.role==="bot");
+  const isTyping = loading || demoLoading;
+  const canGen   = !loading && !!pdfB64 && !!instruction.trim();
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", minHeight:"100vh" }}>
+      {/* HEADER */}
+      <div style={{ background:WA_HEADER, color:"#fff", padding:"14px 20px", display:"flex", alignItems:"center", gap:12, boxShadow:"0 2px 6px rgba(0,0,0,0.25)", flexShrink:0 }}>
+        <div style={{ width:40, height:40, borderRadius:"50%", background:ACCENT, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>📄</div>
+        <div style={{ flex:1 }}>
+          <div style={{ fontWeight:700, fontSize:16 }}>WhatsApp PDF Message Generator</div>
+          <div style={{ fontSize:12, opacity:0.8 }}>Upload PDF · Add instruction · Get ready-to-send WhatsApp messages</div>
+        </div>
+        {botMsgs.length > 0 && (
+          <button onClick={copyAll} style={{ background:copied==="all"?"#fff":"rgba(255,255,255,0.15)", color:copied==="all"?ACCENT_DARK:"#fff", border:"1px solid rgba(255,255,255,0.35)", borderRadius:8, padding:"7px 16px", fontSize:13, cursor:"pointer", fontWeight:600 }}>
+            {copied==="all"?"✓ Copied!":"📋 Copy All"}
+          </button>
+        )}
+      </div>
+
+      <div style={{ flex:1, display:"flex", gap:16, padding:16, maxWidth:1140, margin:"0 auto", width:"100%" }}>
+        {/* LEFT PANEL */}
+        <div style={{ width:330, flexShrink:0, background:"#fff", borderRadius:12, boxShadow:"0 1px 4px rgba(0,0,0,0.1)", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          <div style={{ background:WA_HEADER, color:"#fff", padding:"10px 16px", fontSize:13, fontWeight:700, letterSpacing:0.4 }}>⚙️ CONFIGURATION</div>
+          <div style={{ padding:16, flex:1, display:"flex", flexDirection:"column", gap:14, overflowY:"auto" }}>
+
+            <div style={{ background:"#fff8e1", border:"1.5px solid #FFB300", borderRadius:10, padding:"10px 13px", fontSize:12, color:"#795548", display:"flex", gap:9, alignItems:"flex-start" }}>
+              <span style={{ fontSize:20, lineHeight:1 }}>🎯</span>
+              <div><strong>Demo Mode</strong> — no setup needed!<br/><span style={{ color:"#aaa" }}>Shows the BMJ invoice workflow instantly.</span></div>
+            </div>
+            <button className="demo-btn" onClick={runDemo} disabled={demoLoading}>{demoLoading?"⏳  Running Demo...":"🚀  Try Demo — One Click"}</button>
+
+            <div style={{ display:"flex", alignItems:"center", gap:8, color:"#bbb", fontSize:11 }}>
+              <div style={{ flex:1, height:1, background:"#e8e8e8" }}/> OR USE YOUR OWN PDF <div style={{ flex:1, height:1, background:"#e8e8e8" }}/>
+            </div>
+
+            <div style={{ background:"#e8f5e9", border:"1px solid #a5d6a7", borderRadius:8, padding:"8px 12px", fontSize:12, color:"#2e7d32", display:"flex", alignItems:"center", gap:8 }}>
+              <span>🔒</span><span>Secured · Key stored on server · Never in code</span>
+            </div>
+
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:"#555", marginBottom:5, display:"block" }}>📎 UPLOAD YOUR PDF</label>
+              <div onDragOver={e=>{e.preventDefault();setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={onDrop} onClick={()=>fileRef.current.click()}
+                style={{ border:`2px dashed ${dragging?ACCENT:pdfFile?ACCENT_DARK:"#ccc"}`, borderRadius:10, padding:"18px 14px", textAlign:"center", cursor:"pointer", background:pdfFile||dragging?"#f0fff4":"#fafafa", transition:"all 0.2s" }}>
+                <div style={{ fontSize:28, marginBottom:4 }}>{pdfFile?"✅":"📂"}</div>
+                <div style={{ fontSize:13, color:"#555" }}>{pdfFile?pdfFile.name:"Drag & drop or click to browse"}</div>
+                <div style={{ fontSize:11, color:"#999", marginTop:3 }}>{pdfFile?`${(pdfFile.size/1024).toFixed(1)} KB`:"Invoices · Contracts · Quotes"}</div>
+                <input ref={fileRef} type="file" accept=".pdf" style={{ display:"none" }} onChange={e=>handleFile(e.target.files[0])}/>
+              </div>
+              {pdfFile && (
+                <div style={{ display:"flex", alignItems:"center", gap:8, background:"#e8f5e9", border:"1px solid #a5d6a7", borderRadius:8, padding:"6px 10px", fontSize:12, color:"#2e7d32", marginTop:6 }}>
+                  <span>📄</span>
+                  <span style={{ flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{pdfFile.name}</span>
+                  <span style={{ cursor:"pointer", color:"#e53935", fontWeight:700 }} onClick={()=>{setPdfFile(null);setPdfB64(null);}}>✕</span>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:"#555", marginBottom:5, display:"block" }}>📝 INSTRUCTION</label>
+              <textarea value={instruction} onChange={e=>setInstr(e.target.value)} placeholder={"e.g. Tt pls $79576\nSunley fab copy and msg"} style={{ width:"100%", border:"1.5px solid #ddd", borderRadius:8, padding:"10px 12px", fontSize:13, fontFamily:"inherit", minHeight:70 }}/>
+            </div>
+
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:"#555", marginBottom:5, display:"block" }}>📋 MESSAGE FORMAT <span style={{ fontWeight:400, color:"#aaa" }}>(optional)</span></label>
+              <textarea value={msgFormat} onChange={e=>setMsgFmt(e.target.value)} placeholder={"Paste your required message template...\ne.g.\nBENEFICIARY NAME: ...\nBANK NAME: ...\nACCOUNT NO: ..."} style={{ width:"100%", border:"1.5px solid #ddd", borderRadius:8, padding:"10px 12px", fontSize:12, fontFamily:"monospace", minHeight:100 }}/>
+            </div>
+
+            {error && <div style={{ background:"#fff3f3", border:"1px solid #ffcdd2", borderRadius:8, padding:"10px 12px", fontSize:12, color:"#c62828" }}>⚠️ {error}</div>}
+
+            <button className="real-btn" onClick={generate} disabled={!canGen}>{loading?"⏳  Generating...":"✉️  Generate WhatsApp Messages"}</button>
+
+            {botMsgs.length > 0 && (
+              <div style={{ fontSize:11, color:"#999", textAlign:"center" }}>
+                {isDemo && <span style={{ background:"#FF9800", color:"#fff", fontSize:10, fontWeight:700, borderRadius:6, padding:"2px 7px", marginRight:6 }}>DEMO</span>}
+                {botMsgs.length} message{botMsgs.length>1?"s":""} generated
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT: CHAT */}
+        <div style={{ flex:1, minWidth:0, background:"#fff", borderRadius:12, boxShadow:"0 1px 4px rgba(0,0,0,0.1)", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          <div style={{ background:WA_HEADER, color:"#fff", padding:"10px 16px", display:"flex", alignItems:"center", gap:12, flexShrink:0 }}>
+            <div style={{ width:38, height:38, borderRadius:"50%", background:"rgba(255,255,255,0.15)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>👤</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontWeight:700, fontSize:15 }}>Payment Team {isDemo && <span style={{ background:"#FF9800", color:"#fff", fontSize:10, fontWeight:700, borderRadius:6, padding:"2px 7px", marginLeft:8 }}>DEMO</span>}</div>
+              <div style={{ fontSize:11, opacity:0.8 }}>{isTyping?"typing...":messages.length>0?"online":"last seen today"}</div>
+            </div>
+            <div style={{ display:"flex", gap:16, opacity:0.75, fontSize:20 }}>📞 📹 ⋮</div>
+          </div>
+
+          <div ref={chatRef} style={{ flex:1, background:WA_BG, padding:16, overflowY:"auto", backgroundImage:`url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23c4b5a0' fill-opacity='0.15'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`, display:"flex", flexDirection:"column", gap:10 }}>
+            {messages.length === 0 ? (
+              <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", color:"#bbb", gap:12, paddingTop:80 }}>
+                <div style={{ fontSize:64, opacity:0.25 }}>💬</div>
+                <div style={{ fontSize:15, fontWeight:600, color:"#aaa" }}>No messages yet</div>
+                <div style={{ fontSize:12 }}>Click "Try Demo" or upload a PDF to get started</div>
+              </div>
+            ) : (
+              <>
+                <div style={{ textAlign:"center", fontSize:11, color:"#888", background:"rgba(255,255,255,0.7)", borderRadius:10, padding:"3px 14px", alignSelf:"center" }}>Today</div>
+                {messages.map((msg, i) => (
+                  <div key={i} className="msg-anim">
+                    {msg.role==="bot" && msg.idx > 1 && <div style={{ textAlign:"center", fontSize:11, color:"#888", background:"rgba(255,255,255,0.7)", borderRadius:10, padding:"3px 14px", margin:"6px auto", width:"fit-content" }}>Message {msg.idx}</div>}
+                    <div style={{ display:"flex", justifyContent:msg.role==="bot"?"flex-end":"flex-start", alignItems:"flex-end", gap:8 }}>
+                      {msg.role==="user" && <div style={{ width:30, height:30, borderRadius:"50%", background:WA_HEADER, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15, color:"#fff", flexShrink:0, marginBottom:2 }}>🧑</div>}
+                      <div style={{ maxWidth:"76%", background:msg.role==="bot"?WA_BUBBLE:"#fff", borderRadius:msg.role==="bot"?"12px 2px 12px 12px":"2px 12px 12px 12px", padding:"10px 13px 6px", boxShadow:"0 1px 2px rgba(0,0,0,0.13)" }}>
+                        <p style={{ fontSize:13.5, color:"#111", whiteSpace:"pre-wrap", lineHeight:1.58, margin:0, fontFamily:"'Segoe UI',sans-serif" }}>{msg.text}</p>
+                        <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", gap:4, marginTop:5 }}>
+                          <span style={{ fontSize:10.5, color:"#888" }}>{msg.time}</span>
+                          {msg.role==="bot" && <span style={{ fontSize:13, color:ACCENT_DARK }}>✓✓</span>}
+                          {msg.role==="bot" && <button className="copy-btn" onClick={()=>copyMsg(msg.text,i)}>{copied===i?"✓ copied":"📋 copy"}</button>}
+                        </div>
+                      </div>
+                      {msg.role==="bot" && <div style={{ width:30, height:30, borderRadius:"50%", background:WA_HEADER, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15, color:"#fff", flexShrink:0, marginBottom:2 }}>🤖</div>}
+                    </div>
+                  </div>
+                ))}
+                {isTyping && (
+                  <div style={{ display:"flex", justifyContent:"flex-end", alignItems:"flex-end", gap:8 }} className="msg-anim">
+                    <div style={{ background:WA_BUBBLE, borderRadius:"12px 2px 12px 12px", padding:"10px 14px", boxShadow:"0 1px 2px rgba(0,0,0,0.1)", opacity:0.8 }}>
+                      <LoadingDots/><span style={{ fontSize:13, color:"#999" }}>Analyzing PDF...</span>
+                    </div>
+                    <div style={{ width:30, height:30, borderRadius:"50%", background:WA_HEADER, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15, color:"#fff", flexShrink:0 }}>🤖</div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div style={{ background:"#f5f5f5", borderTop:"1px solid #e0e0e0", padding:"8px 16px", fontSize:12, color:"#666", display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+            <span style={{ width:8, height:8, borderRadius:"50%", background:isDemo?"#FF9800":pdfB64?ACCENT:"#ccc", display:"inline-block" }}/>
+            <span>{isDemo?"Demo: PFI.pdf (BMJ Proforma Invoice)":pdfFile?pdfFile.name:"No PDF loaded"}</span>
+            <span style={{ marginLeft:"auto", color:"#bbb" }}>{botMsgs.length>0&&`${botMsgs.length} msg ready · `}Powered by Google Gemini</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
