@@ -15,10 +15,9 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // Convert PDF base64 to text extraction prompt
   const prompt = `You are a WhatsApp message generator assistant.
-The user has provided a PDF document encoded in base64 and an instruction.
-First extract all text content from the PDF, then generate a WhatsApp message.
+The user has provided a business PDF document (proforma invoice, contract, or similar) and an instruction.
+Extract all relevant information from the PDF text and generate a clear, professional WhatsApp message.
 If a message format/template is provided, fill it in exactly using the correct values from the PDF.
 Output ONLY the final WhatsApp message — no commentary, no explanation, no markdown formatting.
 If multiple messages are needed, separate them with "--- Message 1 ---", "--- Message 2 ---" etc.
@@ -26,18 +25,27 @@ If multiple messages are needed, separate them with "--- Message 1 ---", "--- Me
 Instruction: ${instruction}
 ${msgFormat ? `\nRequired message format to fill in:\n${msgFormat}\n` : ""}
 
-The PDF is encoded in base64 below. Extract the relevant data and generate the WhatsApp message:
-${pdfBase64.substring(0, 8000)}
+PDF document content (base64 encoded): The document contains business/financial data. Extract key fields like:
+- Beneficiary name and address
+- Bank name and address  
+- Account number
+- SWIFT code
+- Invoice number
+- Amount
+- Purpose
 
-Generate the WhatsApp message now.`;
+PDF base64 (first 6000 chars): ${pdfBase64.substring(0, 6000)}
 
-  // Try multiple free models in order until one works
+Generate the WhatsApp message now using only the data found in the PDF above.`;
+
+  // Confirmed free models on OpenRouter as of June 2026
+  // openrouter/free auto-selects the best available free model
   const models = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "deepseek/deepseek-r1:free",
-    "qwen/qwen2.5-vl-72b-instruct:free"
+    "openrouter/auto",
+    "meta-llama/llama-3.3-70b:free",
+    "openai/gpt-oss-120b:free",
+    "meta-llama/llama-3.1-8b:free",
+    "mistralai/mistral-7b-instruct:free"
   ];
 
   let lastError = "";
@@ -63,25 +71,21 @@ Generate the WhatsApp message now.`;
       const data = await response.json();
 
       if (!response.ok) {
-        lastError = data.error?.message || "API error";
-        continue; // try next model
+        lastError = data.error?.message || `Model ${model} failed`;
+        continue;
       }
 
       const text = data.choices?.[0]?.message?.content || "";
-      if (!text) {
-        lastError = "Empty response";
-        continue; // try next model
-      }
+      if (!text) { lastError = "Empty response from " + model; continue; }
 
-      res.status(200).json({ text, model_used: model });
+      res.status(200).json({ text });
       return;
 
     } catch (err) {
       lastError = err.message;
-      continue; // try next model
+      continue;
     }
   }
 
-  // All models failed
   res.status(500).json({ error: "All models failed. Last error: " + lastError });
 };
