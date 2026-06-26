@@ -1,5 +1,3 @@
-const fetch = require("node-fetch");
-
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -27,7 +25,8 @@ Instruction: ${instruction}
 ${msgFormat ? `\nRequired message format to fill in:\n${msgFormat}\n` : ""}
 Generate the WhatsApp message now.`;
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // Updated to latest working Gemini model
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
   try {
     const geminiRes = await fetch(geminiUrl, {
