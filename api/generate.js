@@ -1,47 +1,4 @@
-const pdfParse  = require("pdf-parse");
-const pdfjsLib  = require("pdfjs-dist/legacy/build/pdf.js");
-const { createCanvas } = require("canvas");
-const Tesseract = require("tesseract.js");
-
-// ── Render PDF page to image buffer using pdfjs + canvas ──
-async function renderPDFPageToBuffer(pdfBuffer) {
-  try {
-    const data = new Uint8Array(pdfBuffer);
-    const loadingTask = pdfjsLib.getDocument({ data, useSystemFonts: true });
-    const pdf = await loadingTask.promise;
-    const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 2.5 }); // higher scale = better OCR
-
-    const canvas = createCanvas(viewport.width, viewport.height);
-    const ctx = canvas.getContext("2d");
-
-    await page.render({
-      canvasContext: ctx,
-      viewport,
-      canvasFactory: {
-        create: (w, h) => { const c = createCanvas(w, h); return { canvas: c, context: c.getContext("2d") }; },
-        reset: (obj, w, h) => { obj.canvas.width = w; obj.canvas.height = h; },
-        destroy: () => {}
-      }
-    }).promise;
-
-    return canvas.toBuffer("image/png");
-  } catch(e) {
-    return null;
-  }
-}
-
-// ── Run Tesseract OCR on image buffer ──
-async function ocrImage(imageBuffer) {
-  try {
-    const { data: { text } } = await Tesseract.recognize(imageBuffer, "eng", {
-      logger: () => {}
-    });
-    return text || "";
-  } catch(e) {
-    return "";
-  }
-}
+const pdfParse = require("pdf-parse");
 
 function parseAmountFromInstruction(instruction) {
   const m = instruction.match(/\$?\s*([\d,]+(?:\.\d{1,2})?)/);
@@ -91,7 +48,6 @@ function buildFieldMap(text) {
   return map;
 }
 
-// ── Extract seller name from top lines before BUYER/INVOICE keywords ──
 function extractSellerName(lines) {
   for (const line of lines) {
     if (/^(COMMERCIAL|PROFORMA|BUYER|DATE|INVOICE|PARTICULARS|TO\s*:)/i.test(line)) break;
@@ -121,6 +77,43 @@ function extractSellerAddress(lines) {
   return addrLines.length > 0 ? addrLines.join(" ") : null;
 }
 
+// ── OCR via ocr.space — safe JSON parse ──
+async function ocrWithAPI(pdfBase64) {
+  try {
+    const apiKey = process.env.OCR_API_KEY || "helloworld";
+
+    const response = await fetch("https://api.ocr.space/parse/image", {
+      method: "POST",
+      headers: {
+        "apikey": apiKey,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        base64Image: "data:application/pdf;base64," + pdfBase64,
+        language: "eng",
+        isOverlayRequired: "false",
+        filetype: "PDF",
+        detectOrientation: "true",
+        scale: "true",
+        isTable: "true",
+        OCREngine: "2"
+      }).toString()
+    });
+
+    // Safe parse — don't crash if not JSON
+    const raw = await response.text();
+    let data;
+    try { data = JSON.parse(raw); } catch(e) { return ""; }
+
+    if (data && data.ParsedResults && data.ParsedResults.length > 0) {
+      return data.ParsedResults.map(r => r.ParsedText || "").join("\n");
+    }
+    return "";
+  } catch(e) {
+    return "";
+  }
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -135,24 +128,20 @@ module.exports = async function handler(req, res) {
 
   const pdfBuffer = Buffer.from(pdfBase64, "base64");
 
-  // ── Step 1: Extract text with pdf-parse ──
+  // ── Step 1: pdf-parse ──
   let pdfText = "";
   try {
     const parsed = await pdfParse(pdfBuffer);
     pdfText = parsed.text || "";
   } catch(e) {}
 
-  // ── Step 2: OCR the PDF page image for anything missed ──
+  // ── Step 2: OCR for image-based content ──
   let ocrText = "";
   try {
-    const imgBuffer = await renderPDFPageToBuffer(pdfBuffer);
-    if (imgBuffer) {
-      ocrText = await ocrImage(imgBuffer);
-    }
+    ocrText = await ocrWithAPI(pdfBase64);
   } catch(e) {}
 
-  // ── Step 3: Merge both texts ──
-  // OCR text goes first — it captures image-based headers
+  // ── Step 3: Merge — OCR first so image header is prioritised ──
   const combinedText = ocrText + "\n" + pdfText;
 
   if (combinedText.trim().length < 10)
@@ -161,7 +150,7 @@ module.exports = async function handler(req, res) {
   const rawLines = combinedText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
   const fields   = buildFieldMap(combinedText);
 
-  // ── Step 4: Extract all fields ──
+  // ── Extract all fields ──
   const sellerName    = extractSellerName(rawLines);
   const sellerAddress = extractSellerAddress(rawLines);
 
@@ -205,10 +194,17 @@ module.exports = async function handler(req, res) {
   if (purpose)       values["PURPOSE"]                  = clean(purpose);
   if (amount)        values["AMOUNT USD"]               = amount;
 
+  // ── Return debug info so we can see what was extracted ──
   if (msgFormat && msgFormat.trim().length > 0) {
-    return res.status(200).json({ text: fillTemplate(msgFormat, values).trim() });
+    return res.status(200).json({
+      text: fillTemplate(msgFormat, values).trim(),
+      debug: { ocrLines: ocrText.split("\n").slice(0,20), pdfLines: pdfText.split("\n").slice(0,20) }
+    });
   }
 
   const lines = Object.entries(values).map(([k,v]) => k + ": " + v);
-  return res.status(200).json({ text: lines.join("\n\n") });
+  return res.status(200).json({
+    text: lines.join("\n\n"),
+    debug: { ocrLines: ocrText.split("\n").slice(0,20), pdfLines: pdfText.split("\n").slice(0,20) }
+  });
 };
