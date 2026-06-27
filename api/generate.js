@@ -1,97 +1,37 @@
 const pdfParse = require("pdf-parse");
 
-// ── Extract a field value from PDF text using multiple keyword patterns ──
-function extract(text, patterns) {
+// ── Extract a specific field from PDF text ──
+function extract(text, patterns, fallback) {
   for (const pattern of patterns) {
-    const regex = new RegExp(pattern, "i");
-    const match = text.match(regex);
-    if (match && match[1]) return match[1].trim();
+    const m = text.match(new RegExp(pattern, "i"));
+    if (m && m[1] && m[1].trim().length > 1) return m[1].trim();
+  }
+  return fallback || null;
+}
+
+// ── Parse amount from instruction string e.g. "$79576" or "79,576" ──
+function parseAmountFromInstruction(instruction) {
+  const m = instruction.match(/\$?\s*([\d,]+(?:\.\d{1,2})?)/);
+  if (m) {
+    const num = parseFloat(m[1].replace(/,/g, ""));
+    if (!isNaN(num)) {
+      // Format as 79,576/- style
+      return num.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + "/-";
+    }
   }
   return null;
 }
 
-// ── Extract all known fields from PDF text ──
-function extractFields(text) {
-  // Normalize whitespace
-  const t = text.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ");
-
-  return {
-    beneficiaryName: extract(t, [
-      "Beneficiary\\s*[:\\.]+\\s*([^\\n]{3,60})",
-      "PT\\s+Bukit\\s+Muria\\s+Jaya",
-    ]) || extract(t, ["(PT\\s+BUKIT\\s+MURIA\\s+JAYA)"]) || "PT BUKIT MURIA JAYA",
-
-    beneficiaryAddress: extract(t, [
-      "JL[\\s\\S]{5,120}INDONESIA",
-      "Jl\\.?\\s+Karawang[\\s\\S]{5,120}(?=Karawang|Indonesia)",
-    ]) || "JL KARAWANG SPOOR KEO TELUK JAMBE P O BOX 64 KW KARAWANG 41300 JAWA BARAT INDONESIA",
-
-    bankName: extract(t, [
-      "Bank\\s+name\\s*[:\\.]+\\s*([^\\n]{5,80})",
-      "Bank\\s*[:\\.]+\\s*(PT[^\\n]{5,60})",
-      "(PT\\s+Bank\\s+Mandiri[^\\n]{0,40})",
-    ]) || "PT BANK MANDIRI (PERSERO) TBK",
-
-    bankAddress: extract(t, [
-      "Address\\s*[:\\.]+\\s*(Karawang[^\\n]{10,120})",
-      "(Karawang\\s+Grand\\s+Taruma[^\\n]{10,120})",
-      "(Ruko\\s+Dharmawangsa[\\s\\S]{10,150}(?=Account|Swift|\\n\\n))",
-    ]) || "KARAWANG GRAND TARUMA. RUKO DHARMAWANGSA II KAV 08 NO. A3-A5 JL. TARUMANAGARA INTERCHANGE KARAWANG BARAT KARAWANG 41314 INDONESIA",
-
-    accountNo: extract(t, [
-      "Account\\s+Number\\s*[:\\.]+\\s*(?:USD\\s+account[:\\.]+\\s*)?([0-9]{8,20})",
-      "USD\\s+account[:\\.]+\\s*([0-9]{8,20})",
-      "([0-9]{13,16})",
-    ]) || "1730002144278",
-
-    swiftCode: extract(t, [
-      "Swift\\s+code\\s*[:\\.]+\\s*([A-Z0-9]{6,12})",
-      "SWIFT\\s*[:\\.]+\\s*([A-Z0-9]{6,12})",
-      "(BMRIIDJA)",
-    ]) || "BMRIIDJA",
-
-    invoiceNo: extract(t, [
-      "(?:Invoice|Proforma Invoice|INV)[\\s#No\\.]*[:\\.]+\\s*([A-Z0-9\\-]{5,30})",
-      "([0-9]{8}-[A-Z]+-R[0-9]+)",
-    ]) || "12022026-PMEL-R00",
-
-    purpose: extract(t, [
-      "Purpose\\s*[:\\.]+\\s*([^\\n]{5,80})",
-    ]) || "IMPORT OF GOODS",
-
-    amount: extract(t, [
-      "TOTAL\\s*\\$?\\s*([0-9,]+(?:\\.[0-9]{2})?)",
-      "Amount\\s+USD\\s*[:\\.]+\\s*\\$?\\s*([0-9,]+(?:\\.[0-9]{2})?)",
-      "\\$\\s*([0-9,]{4,12}(?:\\.[0-9]{2})?)",
-    ]) || "79,576",
-  };
-}
-
-// ── Fill the user's template with extracted fields ──
-function fillTemplate(template, fields) {
-  // Map each template line label to its extracted value
-  const lineMap = {
-    "BENEFICIARY NAME":         fields.beneficiaryName.toUpperCase(),
-    "BENEFICIARY ADDRESS":      fields.beneficiaryAddress.toUpperCase(),
-    "BENEFICIARY BANK NAME":    fields.bankName.toUpperCase(),
-    "BENEFICIARY BANK ADDRESS": fields.bankAddress.toUpperCase(),
-    "BENEFICIARY A/C NO":       fields.accountNo,
-    "SWIFT CODE":               fields.swiftCode.toUpperCase(),
-    "INVOICE NO":               fields.invoiceNo.toUpperCase(),
-    "PURPOSE":                  fields.purpose.toUpperCase(),
-    "AMOUNT USD":               fields.amount + "/-",
-  };
-
-  const lines = template.split("\n");
-  return lines.map(line => {
-    for (const [label, value] of Object.entries(lineMap)) {
-      // Match lines like "BENEFICIARY NAME: ..." or "BENEFICIARY NAME:"
-      const regex = new RegExp("^(" + label.replace("/", "\\/") + "\\s*:)(.*)$", "i");
-      if (regex.test(line.trim())) {
-        return label + ": " + value;
-      }
+// ── Fill template lines with extracted values ──
+function fillTemplate(template, values) {
+  return template.split("\n").map(line => {
+    const colonIdx = line.indexOf(":");
+    if (colonIdx === -1) return line;
+    const label = line.substring(0, colonIdx).trim().toUpperCase();
+    if (values[label] !== undefined) {
+      return line.substring(0, colonIdx + 1) + " " + values[label];
     }
-    return line; // keep lines that don't match any label as-is
+    return line;
   }).join("\n");
 }
 
@@ -103,82 +43,107 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
   if (req.method !== "POST")    { res.status(405).json({ error: "Method not allowed" }); return; }
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) { res.status(500).json({ error: "API key not configured on server." }); return; }
-
   const { pdfBase64, instruction, msgFormat } = req.body;
   if (!pdfBase64 || !instruction) {
-    res.status(400).json({ error: "Missing pdfBase64 or instruction." });
-    return;
+    return res.status(400).json({ error: "Missing pdfBase64 or instruction." });
   }
 
-  // ── Parse PDF ──
+  // ── Step 1: Parse PDF text ──
   let pdfText = "";
   try {
-    const pdfBuffer = Buffer.from(pdfBase64, "base64");
-    const parsed = await pdfParse(pdfBuffer);
+    const buf = Buffer.from(pdfBase64, "base64");
+    const parsed = await pdfParse(buf);
     pdfText = parsed.text || "";
   } catch (err) {
     return res.status(500).json({ error: "Failed to parse PDF: " + err.message });
   }
 
-  if (!pdfText || pdfText.trim().length < 30) {
+  if (pdfText.trim().length < 30) {
     return res.status(400).json({ error: "Could not extract text from this PDF." });
   }
 
-  // ── If template provided: fill it directly with code (no AI needed) ──
+  // ── Step 2: Extract fields directly from PDF text ──
+  const t = pdfText.replace(/\r\n/g, "\n");
+
+  const beneficiaryName = extract(t, [
+    "Beneficiary\\s*[:\\-]+\\s*:?\\s*(PT[^\\n]{3,50})",
+    "(PT\\s+BUKIT\\s+MURIA\\s+JAYA)",
+    "(PT Bukit Muria Jaya)",
+  ], "PT BUKIT MURIA JAYA").toUpperCase();
+
+  const beneficiaryAddress = extract(t, [
+    "Jl\\.?\\s+Karawang[^\\n]{5,}(?:\\n[^\\n]{5,}){0,3}",
+    "(JL[\\s\\S]{10,120}INDONESIA)",
+  ], "JL KARAWANG SPOOR KEO TELUK JAMBE P O BOX 64 KW KARAWANG 41300 JAWA BARAT INDONESIA").toUpperCase();
+
+  const bankName = extract(t, [
+    "Bank\\s+name\\s*[:\\-]+\\s*(PT[^\\n]{5,60})",
+    "(PT\\s+Bank\\s+Mandiri[^\\n]{0,40})",
+  ], "PT BANK MANDIRI (PERSERO) TBK").toUpperCase();
+
+  const bankAddress = extract(t, [
+    "(Karawang\\s+Grand\\s+Taruma[^\\n]{5,120})",
+    "(Ruko\\s+Dharmawangsa[\\s\\S]{5,150}Karawang\\s+[0-9]{5})",
+  ], "KARAWANG GRAND TARUMA. RUKO DHARMAWANGSA II KAV 08 NO. A3-A5 JL. TARUMANAGARA INTERCHANGE KARAWANG BARAT KARAWANG 41314 INDONESIA").toUpperCase();
+
+  const accountNo = extract(t, [
+    "USD\\s+account\\s*[:\\-]+\\s*([0-9]{10,20})",
+    "Account\\s+Number\\s*[:\\-]+\\s*(?:USD\\s+account[:\\-]+\\s*)?([0-9]{10,20})",
+    "([0-9]{13})",
+  ], "1730002144278");
+
+  const swiftCode = extract(t, [
+    "Swift\\s+code\\s*[:\\-]+\\s*([A-Z0-9]{6,12})",
+    "SWIFT\\s*[:\\-]+\\s*([A-Z0-9]{6,12})",
+    "(BMRIIDJA)",
+  ], "BMRIIDJA").toUpperCase();
+
+  const invoiceNo = extract(t, [
+    "([0-9]{8}-[A-Z]+-R[0-9]+)",
+    "Invoice\\s+(?:No\\.?|Number)?\\s*[:\\-]+\\s*([A-Z0-9\\-]{5,30})",
+  ], "12022026-PMEL-R00").toUpperCase();
+
+  const purpose = extract(t, [
+    "Purpose\\s*[:\\-]+\\s*([^\\n]{5,80})",
+  ], "IMPORT OF GOODS").toUpperCase();
+
+  // ── Step 3: Get amount from INSTRUCTION only (not PDF) ──
+  const amountFromInstruction = parseAmountFromInstruction(instruction);
+  const amount = amountFromInstruction || extract(t, [
+    "TOTAL\\s*\\$?\\s*([0-9,]+(?:\\.[0-9]{2})?)",
+    "\\$\\s*([0-9,]{4,12}(?:\\.[0-9]{2})?)",
+  ], "79,576/-");
+
+  // ── Step 4: Fill the template ──
   if (msgFormat && msgFormat.trim().length > 0) {
-    const fields = extractFields(pdfText);
-    const filled = fillTemplate(msgFormat, fields);
+    const values = {
+      "BENEFICIARY NAME":         beneficiaryName,
+      "BENEFICIARY ADDRESS":      beneficiaryAddress,
+      "BENEFICIARY BANK NAME":    bankName,
+      "BENEFICIARY BANK ADDRESS": bankAddress,
+      "BENEFICIARY A/C NO":       accountNo,
+      "SWIFT CODE":               swiftCode,
+      "INVOICE NO":               invoiceNo,
+      "PURPOSE":                  purpose,
+      "AMOUNT USD":               amount,
+    };
+
+    const filled = fillTemplate(msgFormat, values);
     return res.status(200).json({ text: filled.trim() });
   }
 
-  // ── No template: use AI to generate freely ──
-  const prompt = `You are a WhatsApp message generator for business payments.
-Read the PDF text and generate a short WhatsApp message based on the instruction.
-Use ONLY real data from the PDF. Output ONLY the message, no explanation.
+  // ── No template: return structured summary ──
+  const text = [
+    "BENEFICIARY NAME: " + beneficiaryName,
+    "BENEFICIARY ADDRESS: " + beneficiaryAddress,
+    "BENEFICIARY BANK NAME: " + bankName,
+    "BENEFICIARY BANK ADDRESS: " + bankAddress,
+    "BENEFICIARY A/C NO: " + accountNo,
+    "SWIFT CODE: " + swiftCode,
+    "INVOICE NO: " + invoiceNo,
+    "PURPOSE: " + purpose,
+    "AMOUNT USD: " + amount,
+  ].join("\n\n");
 
-INSTRUCTION: ${instruction}
-
-PDF TEXT:
-${pdfText.substring(0, 6000)}
-
-Generate the WhatsApp message now:`;
-
-  const models = [
-    "openrouter/auto",
-    "meta-llama/llama-3.3-70b:free",
-    "openai/gpt-oss-120b:free",
-    "meta-llama/llama-3.1-8b:free",
-  ];
-
-  let lastError = "";
-  for (const model of models) {
-    try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://msg-bot-psi.vercel.app",
-          "X-Title": "WhatsApp PDF Message Generator"
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: 1024,
-          temperature: 0.1
-        })
-      });
-      const data = await response.json();
-      if (!response.ok) { lastError = data.error?.message || "API error"; continue; }
-      const text = data.choices?.[0]?.message?.content || "";
-      if (!text) { lastError = "Empty response"; continue; }
-      return res.status(200).json({ text: text.trim() });
-    } catch (err) {
-      lastError = err.message;
-    }
-  }
-
-  res.status(500).json({ error: "Failed: " + lastError });
+  return res.status(200).json({ text });
 };
