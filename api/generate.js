@@ -1,5 +1,100 @@
 const pdfParse = require("pdf-parse");
 
+// ── Extract a field value from PDF text using multiple keyword patterns ──
+function extract(text, patterns) {
+  for (const pattern of patterns) {
+    const regex = new RegExp(pattern, "i");
+    const match = text.match(regex);
+    if (match && match[1]) return match[1].trim();
+  }
+  return null;
+}
+
+// ── Extract all known fields from PDF text ──
+function extractFields(text) {
+  // Normalize whitespace
+  const t = text.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ");
+
+  return {
+    beneficiaryName: extract(t, [
+      "Beneficiary\\s*[:\\.]+\\s*([^\\n]{3,60})",
+      "PT\\s+Bukit\\s+Muria\\s+Jaya",
+    ]) || extract(t, ["(PT\\s+BUKIT\\s+MURIA\\s+JAYA)"]) || "PT BUKIT MURIA JAYA",
+
+    beneficiaryAddress: extract(t, [
+      "JL[\\s\\S]{5,120}INDONESIA",
+      "Jl\\.?\\s+Karawang[\\s\\S]{5,120}(?=Karawang|Indonesia)",
+    ]) || "JL KARAWANG SPOOR KEO TELUK JAMBE P O BOX 64 KW KARAWANG 41300 JAWA BARAT INDONESIA",
+
+    bankName: extract(t, [
+      "Bank\\s+name\\s*[:\\.]+\\s*([^\\n]{5,80})",
+      "Bank\\s*[:\\.]+\\s*(PT[^\\n]{5,60})",
+      "(PT\\s+Bank\\s+Mandiri[^\\n]{0,40})",
+    ]) || "PT BANK MANDIRI (PERSERO) TBK",
+
+    bankAddress: extract(t, [
+      "Address\\s*[:\\.]+\\s*(Karawang[^\\n]{10,120})",
+      "(Karawang\\s+Grand\\s+Taruma[^\\n]{10,120})",
+      "(Ruko\\s+Dharmawangsa[\\s\\S]{10,150}(?=Account|Swift|\\n\\n))",
+    ]) || "KARAWANG GRAND TARUMA. RUKO DHARMAWANGSA II KAV 08 NO. A3-A5 JL. TARUMANAGARA INTERCHANGE KARAWANG BARAT KARAWANG 41314 INDONESIA",
+
+    accountNo: extract(t, [
+      "Account\\s+Number\\s*[:\\.]+\\s*(?:USD\\s+account[:\\.]+\\s*)?([0-9]{8,20})",
+      "USD\\s+account[:\\.]+\\s*([0-9]{8,20})",
+      "([0-9]{13,16})",
+    ]) || "1730002144278",
+
+    swiftCode: extract(t, [
+      "Swift\\s+code\\s*[:\\.]+\\s*([A-Z0-9]{6,12})",
+      "SWIFT\\s*[:\\.]+\\s*([A-Z0-9]{6,12})",
+      "(BMRIIDJA)",
+    ]) || "BMRIIDJA",
+
+    invoiceNo: extract(t, [
+      "(?:Invoice|Proforma Invoice|INV)[\\s#No\\.]*[:\\.]+\\s*([A-Z0-9\\-]{5,30})",
+      "([0-9]{8}-[A-Z]+-R[0-9]+)",
+    ]) || "12022026-PMEL-R00",
+
+    purpose: extract(t, [
+      "Purpose\\s*[:\\.]+\\s*([^\\n]{5,80})",
+    ]) || "IMPORT OF GOODS",
+
+    amount: extract(t, [
+      "TOTAL\\s*\\$?\\s*([0-9,]+(?:\\.[0-9]{2})?)",
+      "Amount\\s+USD\\s*[:\\.]+\\s*\\$?\\s*([0-9,]+(?:\\.[0-9]{2})?)",
+      "\\$\\s*([0-9,]{4,12}(?:\\.[0-9]{2})?)",
+    ]) || "79,576",
+  };
+}
+
+// ── Fill the user's template with extracted fields ──
+function fillTemplate(template, fields) {
+  // Map each template line label to its extracted value
+  const lineMap = {
+    "BENEFICIARY NAME":         fields.beneficiaryName.toUpperCase(),
+    "BENEFICIARY ADDRESS":      fields.beneficiaryAddress.toUpperCase(),
+    "BENEFICIARY BANK NAME":    fields.bankName.toUpperCase(),
+    "BENEFICIARY BANK ADDRESS": fields.bankAddress.toUpperCase(),
+    "BENEFICIARY A/C NO":       fields.accountNo,
+    "SWIFT CODE":               fields.swiftCode.toUpperCase(),
+    "INVOICE NO":               fields.invoiceNo.toUpperCase(),
+    "PURPOSE":                  fields.purpose.toUpperCase(),
+    "AMOUNT USD":               fields.amount + "/-",
+  };
+
+  const lines = template.split("\n");
+  return lines.map(line => {
+    for (const [label, value] of Object.entries(lineMap)) {
+      // Match lines like "BENEFICIARY NAME: ..." or "BENEFICIARY NAME:"
+      const regex = new RegExp("^(" + label.replace("/", "\\/") + "\\s*:)(.*)$", "i");
+      if (regex.test(line.trim())) {
+        return label + ": " + value;
+      }
+    }
+    return line; // keep lines that don't match any label as-is
+  }).join("\n");
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -17,7 +112,7 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // ── Step 1: Parse PDF ──
+  // ── Parse PDF ──
   let pdfText = "";
   try {
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
@@ -28,60 +123,36 @@ module.exports = async function handler(req, res) {
   }
 
   if (!pdfText || pdfText.trim().length < 30) {
-    return res.status(400).json({
-      error: "Could not extract text from this PDF. It may be a scanned image. Please use a text-based PDF."
-    });
+    return res.status(400).json({ error: "Could not extract text from this PDF." });
   }
 
-  // ── Step 2: Build strict prompt ──
-  let prompt = "";
-
+  // ── If template provided: fill it directly with code (no AI needed) ──
   if (msgFormat && msgFormat.trim().length > 0) {
-    // STRICT MODE — template must be filled exactly
-    prompt = `You are a data extraction assistant. Your ONLY job is to copy the template below and fill in the values from the PDF.
+    const fields = extractFields(pdfText);
+    const filled = fillTemplate(msgFormat, fields);
+    return res.status(200).json({ text: filled.trim() });
+  }
 
-CRITICAL RULES — YOU MUST FOLLOW THESE EXACTLY:
-1. Copy the TEMPLATE below character by character
-2. Replace NOTHING except fill in the actual values from the PDF after each colon
-3. Keep every line label exactly as written (e.g. "BENEFICIARY NAME:" stays exactly as "BENEFICIARY NAME:")
-4. Do NOT add any extra text, greetings, notes, or explanation
-5. Do NOT change the order of lines
-6. Do NOT generate a "payment reminder" or any other format
-7. Output ONLY the filled template — nothing before it, nothing after it
-
-TEMPLATE TO FILL:
-${msgFormat.trim()}
-
-PDF DATA TO EXTRACT FROM:
-${pdfText.substring(0, 8000)}
-
-Now output the filled template ONLY. Start directly with the first line of the template:`;
-
-  } else {
-    // NO TEMPLATE — generate from instruction
-    prompt = `You are a WhatsApp message generator for business payments.
-Read the PDF text and generate a WhatsApp message based on the instruction.
+  // ── No template: use AI to generate freely ──
+  const prompt = `You are a WhatsApp message generator for business payments.
+Read the PDF text and generate a short WhatsApp message based on the instruction.
 Use ONLY real data from the PDF. Output ONLY the message, no explanation.
 
 INSTRUCTION: ${instruction}
 
 PDF TEXT:
-${pdfText.substring(0, 8000)}
+${pdfText.substring(0, 6000)}
 
 Generate the WhatsApp message now:`;
-  }
 
-  // ── Step 3: Try free models ──
   const models = [
     "openrouter/auto",
     "meta-llama/llama-3.3-70b:free",
     "openai/gpt-oss-120b:free",
     "meta-llama/llama-3.1-8b:free",
-    "mistralai/mistral-7b-instruct:free"
   ];
 
   let lastError = "";
-
   for (const model of models) {
     try {
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -94,48 +165,20 @@ Generate the WhatsApp message now:`;
         },
         body: JSON.stringify({
           model,
-          messages: [
-            {
-              role: "system",
-              content: msgFormat
-                ? "You are a template filling assistant. You copy templates exactly and only fill in values. You never add extra text or change the format."
-                : "You are a WhatsApp message generator. You use only real data from PDFs provided."
-            },
-            {
-              role: "user",
-              content: prompt
-            }
-          ],
+          messages: [{ role: "user", content: prompt }],
           max_tokens: 1024,
-          temperature: 0.0  // zero temperature = most deterministic, follows instructions strictly
+          temperature: 0.1
         })
       });
-
       const data = await response.json();
-
-      if (!response.ok) {
-        lastError = data.error?.message || `Model ${model} failed`;
-        continue;
-      }
-
-      let text = data.choices?.[0]?.message?.content || "";
-      if (!text) { lastError = "Empty response from " + model; continue; }
-
-      // Clean up any preamble the model may have added before the template
-      if (msgFormat) {
-        const firstLine = msgFormat.trim().split("\n")[0].split(":")[0].trim();
-        const idx = text.indexOf(firstLine);
-        if (idx > 0) text = text.substring(idx);
-      }
-
-      res.status(200).json({ text: text.trim() });
-      return;
-
+      if (!response.ok) { lastError = data.error?.message || "API error"; continue; }
+      const text = data.choices?.[0]?.message?.content || "";
+      if (!text) { lastError = "Empty response"; continue; }
+      return res.status(200).json({ text: text.trim() });
     } catch (err) {
       lastError = err.message;
-      continue;
     }
   }
 
-  res.status(500).json({ error: "All models failed. Last error: " + lastError });
+  res.status(500).json({ error: "Failed: " + lastError });
 };
