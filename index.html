@@ -43,6 +43,9 @@
     var pdfB64     = s(null);
     var instruction= s("");
     var msgFormat  = s("");
+    var beneName   = s("");
+    var beneAddr   = s("");
+    var missingFields = s([]);
     var messages   = s([]);
     var loading    = s(false);
     var error      = s("");
@@ -55,6 +58,9 @@
     var setB64=pdfB64[1], b64=pdfB64[0];
     var setInstr=instruction[1], instr=instruction[0];
     var setFmt=msgFormat[1], fmt=msgFormat[0];
+    var setBeneName=beneName[1], bname=beneName[0];
+    var setBeneAddr=beneAddr[1], baddr=beneAddr[0];
+    var setMissing=missingFields[1], missing=missingFields[0];
     var setMsgs=messages[1], msgs=messages[0];
     var setLoad=loading[1], load=loading[0];
     var setErr=error[1], err=error[0];
@@ -105,11 +111,13 @@
       fetch("/api/generate",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({pdfBase64:b64,instruction:instr,msgFormat:fmt})
+        body:JSON.stringify({pdfBase64:b64,instruction:instr,msgFormat:fmt,beneficiaryName:bname,beneficiaryAddress:baddr})
       })
       .then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d};});})
       .then(function(res){
         if(!res.ok) throw new Error(res.d.error||"Server error.");
+        if(res.d.missingFields && res.d.missingFields.length>0) setMissing(res.d.missingFields);
+        else setMissing([]);
         var raw=res.d.text||"";
         if(!raw) throw new Error("No response. Try again.");
         var parts=raw.split(/---\s*Message\s*\d+\s*---/i).map(function(s){return s.trim();}).filter(Boolean);
@@ -200,6 +208,20 @@
                 placeholder:"Paste your message template...\ne.g.\nBENEFICIARY NAME:\nBANK NAME:\nACCOUNT NO:\nSWIFT CODE:\nAMOUNT USD:",
                 style:{width:"100%",border:"1.5px solid #ddd",borderRadius:8,padding:"10px 12px",fontSize:12,fontFamily:"monospace",minHeight:120}
               })
+            ),
+
+            // Manual override fields when PDF has image header
+            missing.length>0&&e("div",{style:{background:"#fff3e0",border:"1.5px solid #FF9800",borderRadius:10,padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}},
+              e("div",{style:{fontSize:12,fontWeight:700,color:"#e65100",marginBottom:2}},"⚠️ These fields were not found in PDF (image-based header). Enter manually:"),
+              e("div",null,
+                e("label",{style:{fontSize:11,fontWeight:700,color:"#555",marginBottom:4,display:"block"}},"BENEFICIARY NAME"),
+                e("input",{type:"text",value:bname,onChange:function(ev){setBeneName(ev.target.value);},placeholder:"e.g. STERLING FINVEST INC",style:{width:"100%",border:"1.5px solid #ddd",borderRadius:6,padding:"7px 10px",fontSize:12,fontFamily:"inherit"}})
+              ),
+              e("div",null,
+                e("label",{style:{fontSize:11,fontWeight:700,color:"#555",marginBottom:4,display:"block"}},"BENEFICIARY ADDRESS"),
+                e("textarea",{value:baddr,onChange:function(ev){setBeneAddr(ev.target.value);},placeholder:"e.g. 3473 SATELLITE BLVD SUITE 355 DULUTH GA 30096 USA",style:{width:"100%",border:"1.5px solid #ddd",borderRadius:6,padding:"7px 10px",fontSize:12,fontFamily:"inherit",minHeight:55,resize:"vertical"}}),
+                e("button",{onClick:generate,style:{marginTop:8,background:"#FF9800",color:"#fff",border:"none",borderRadius:6,padding:"7px 14px",fontSize:12,fontWeight:700,cursor:"pointer",width:"100%"}},"🔄 Re-generate with these details")
+              )
             ),
 
             err&&e("div",{style:{background:"#fff3f3",border:"1px solid #ffcdd2",borderRadius:8,padding:"10px 12px",fontSize:12,color:"#c62828"}},"⚠️ "+err),
