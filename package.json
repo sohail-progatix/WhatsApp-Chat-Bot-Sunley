@@ -2,6 +2,9 @@
   "name": "whatsapp-pdf-bot",
   "version": "1.0.0",
   "dependencies": {
-    "pdf-parse": "1.1.1"
+    "pdf-parse": "1.1.1",
+    "pdfjs-dist": "3.11.174",
+    "canvas": "2.11.2",
+    "tesseract.js": "5.0.4"
   }
 }
