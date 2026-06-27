@@ -17,7 +17,7 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // ── Step 1: Parse PDF properly using pdf-parse ──
+  // ── Step 1: Parse PDF ──
   let pdfText = "";
   try {
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
@@ -28,31 +28,50 @@ module.exports = async function handler(req, res) {
   }
 
   if (!pdfText || pdfText.trim().length < 30) {
-    return res.status(400).json({ 
-      error: "Could not extract text from this PDF. It may be a scanned image. Please use a text-based PDF." 
+    return res.status(400).json({
+      error: "Could not extract text from this PDF. It may be a scanned image. Please use a text-based PDF."
     });
   }
 
-  // ── Step 2: Build prompt with real extracted text ──
-  const prompt = `You are a WhatsApp message generator for business payments.
+  // ── Step 2: Build strict prompt ──
+  let prompt = "";
 
-TASK: Read the PDF text below and generate a WhatsApp message.
+  if (msgFormat && msgFormat.trim().length > 0) {
+    // STRICT MODE — template must be filled exactly
+    prompt = `You are a data extraction assistant. Your ONLY job is to copy the template below and fill in the values from the PDF.
 
-STRICT RULES:
-- Use ONLY data found in the PDF text below — do NOT invent or assume any values
-- If a message format is provided, fill EVERY field with exact values from the PDF
-- Output ONLY the final WhatsApp message — no preamble, no explanation, no markdown
-- Do not make up names, account numbers, or amounts not found in the PDF
+CRITICAL RULES — YOU MUST FOLLOW THESE EXACTLY:
+1. Copy the TEMPLATE below character by character
+2. Replace NOTHING except fill in the actual values from the PDF after each colon
+3. Keep every line label exactly as written (e.g. "BENEFICIARY NAME:" stays exactly as "BENEFICIARY NAME:")
+4. Do NOT add any extra text, greetings, notes, or explanation
+5. Do NOT change the order of lines
+6. Do NOT generate a "payment reminder" or any other format
+7. Output ONLY the filled template — nothing before it, nothing after it
+
+TEMPLATE TO FILL:
+${msgFormat.trim()}
+
+PDF DATA TO EXTRACT FROM:
+${pdfText.substring(0, 8000)}
+
+Now output the filled template ONLY. Start directly with the first line of the template:`;
+
+  } else {
+    // NO TEMPLATE — generate from instruction
+    prompt = `You are a WhatsApp message generator for business payments.
+Read the PDF text and generate a WhatsApp message based on the instruction.
+Use ONLY real data from the PDF. Output ONLY the message, no explanation.
 
 INSTRUCTION: ${instruction}
-${msgFormat ? `\nMESSAGE FORMAT TO FILL (replace every ... with real values from PDF):\n${msgFormat}\n` : ""}
 
 PDF TEXT:
 ${pdfText.substring(0, 8000)}
 
-Generate the WhatsApp message now using ONLY the real data above:`;
+Generate the WhatsApp message now:`;
+  }
 
-  // ── Step 3: Try free models in order ──
+  // ── Step 3: Try free models ──
   const models = [
     "openrouter/auto",
     "meta-llama/llama-3.3-70b:free",
@@ -75,9 +94,20 @@ Generate the WhatsApp message now using ONLY the real data above:`;
         },
         body: JSON.stringify({
           model,
-          messages: [{ role: "user", content: prompt }],
+          messages: [
+            {
+              role: "system",
+              content: msgFormat
+                ? "You are a template filling assistant. You copy templates exactly and only fill in values. You never add extra text or change the format."
+                : "You are a WhatsApp message generator. You use only real data from PDFs provided."
+            },
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
           max_tokens: 1024,
-          temperature: 0.1
+          temperature: 0.0  // zero temperature = most deterministic, follows instructions strictly
         })
       });
 
@@ -88,10 +118,17 @@ Generate the WhatsApp message now using ONLY the real data above:`;
         continue;
       }
 
-      const text = data.choices?.[0]?.message?.content || "";
+      let text = data.choices?.[0]?.message?.content || "";
       if (!text) { lastError = "Empty response from " + model; continue; }
 
-      res.status(200).json({ text });
+      // Clean up any preamble the model may have added before the template
+      if (msgFormat) {
+        const firstLine = msgFormat.trim().split("\n")[0].split(":")[0].trim();
+        const idx = text.indexOf(firstLine);
+        if (idx > 0) text = text.substring(idx);
+      }
+
+      res.status(200).json({ text: text.trim() });
       return;
 
     } catch (err) {
