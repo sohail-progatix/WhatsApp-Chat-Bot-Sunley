@@ -21,89 +21,104 @@ function fillTemplate(template, values) {
   }).join("\n");
 }
 
-// ── Get value after a label, handling "LABEL : value" and "LABEL:\nvalue" ──
 function getAfterLabel(lines, labelRegex) {
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(labelRegex);
-    if (m) {
-      // Try inline value first (after the colon)
-      const colonIdx = line.lastIndexOf(":");
-      const inline = line.substring(colonIdx + 1).trim();
+    if (labelRegex.test(lines[i])) {
+      const colonIdx = lines[i].lastIndexOf(":");
+      const inline = lines[i].substring(colonIdx + 1).trim();
       if (inline.length > 1) return inline;
-      // Otherwise next line
       if (i + 1 < lines.length) return lines[i + 1].trim();
     }
   }
   return null;
 }
 
-// ── Get lines after a section header until next section ──
-function getLinesAfterHeader(lines, headerRegex, maxLines) {
-  for (let i = 0; i < lines.length; i++) {
-    if (headerRegex.test(lines[i])) {
-      const result = [];
-      for (let j = i + 1; j < lines.length && result.length < maxLines; j++) {
-        const l = lines[j].trim();
-        if (!l) continue;
-        // Stop at next section header
-        if (/^(Ship\s+to|Bill\s+to|Please\s+pay|Intermediate|BUYER|TOTAL|Pro.Forma|Page\s+\d)/i.test(l)) break;
-        result.push(l);
+// ── SELLER EXTRACTION — handles 3 invoice layouts ──
+function extractSeller(lines) {
+
+  // ── LAYOUT A: IFF style ──
+  // Seller block appears AFTER "Pro Forma Invoice Page X of Y" line
+  // Structure: "IFF (NEDERLAND) BV" (short id) → "International Flavors..." (full name) → address
+  const pageMarkerIdx = lines.findIndex(l =>
+    /Pro\s*Forma\s+Invoice\s+Page\s+\d/i.test(l) ||
+    /^Page\s+\d+\s+of\s+\d+/i.test(l)
+  );
+
+  if (pageMarkerIdx >= 0) {
+    const afterPage = lines.slice(pageMarkerIdx + 1);
+    let name = null;
+    const addrLines = [];
+
+    for (let i = 0; i < afterPage.length; i++) {
+      const line = afterPage[i].trim();
+      if (!line) continue;
+      if (/^(Chamber|Phone|VAT|Tax|Reg|Total|Freight|EXPORT|ATTENTION|FOR INVOICE|Pro.Forma\s+No)/i.test(line)) break;
+      if (/^\+\d/.test(line)) break;
+      if (/@/.test(line)) break;
+
+      if (!name) {
+        // If line is short all-caps (letterhead id like "IFF (NEDERLAND) BV")
+        // use the NEXT line as the full legal name
+        if (/^[A-Z0-9\s\(\)\.&\-]{3,30}$/.test(line) && i + 1 < afterPage.length) {
+          const nextLine = afterPage[i + 1].trim();
+          if (/[a-z]/.test(nextLine)) { // full name has mixed case
+            name = nextLine;
+            i++; // skip next line
+          } else {
+            name = line;
+          }
+        } else {
+          name = line;
+        }
+        continue;
       }
-      return result;
+      addrLines.push(line);
+      if (addrLines.length >= 3) break;
+    }
+    if (name && addrLines.length > 0) {
+      return { name: name.trim(), address: addrLines.join(" ") };
     }
   }
-  return [];
-}
 
-// ── Extract seller name & address ──
-// Seller is the ISSUER of the invoice — found at BOTTOM of IFF-style PDFs
-// or at TOP of BMJ-style PDFs (before BUYER:)
-function extractSeller(lines) {
-  // Strategy 1: Look for known seller patterns at bottom (IFF style)
-  // IFF puts company name near end: "IFF (NEDERLAND) BV" then full name then address
-  for (let i = lines.length - 1; i >= 0; i--) {
+  // ── LAYOUT B: BMJ style ──
+  // Seller at TOP before "TO :" or "BUYER:" or "Pro-Forma No"
+  const stopPatterns = /^(BUYER|BILL\s+TO|TO\s*:|COMMERCIAL\s+INVOICE|PROFORMA|Pro.Forma\s+No|Line\s+Material|DATE\s*:)/i;
+  const stopIdx = lines.findIndex(l => stopPatterns.test(l));
+  const topLines = stopIdx > 2 ? lines.slice(0, stopIdx) : [];
+
+  if (topLines.length > 0) {
+    let name = null;
+    const addrLines = [];
+    for (const line of topLines) {
+      if (/^\d[\d\s\-\+\(\)]{4,}$/.test(line)) continue;
+      if (/@/.test(line)) continue;
+      if (/^(Phone|VAT|Chamber|Reg)/i.test(line)) continue;
+      if (!name && /[a-zA-Z]{3,}/.test(line)) { name = line; continue; }
+      if (name) addrLines.push(line);
+    }
+    if (name && addrLines.length > 0) return { name, address: addrLines.join(" ") };
+  }
+
+  // ── LAYOUT C: OCR image header (Sterling style) ──
+  // OCR gives us the company name as first lines
+  for (let i = 0; i < Math.min(lines.length, 12); i++) {
     const line = lines[i];
-    // Skip page markers, totals, dates
-    if (/^(Page|Total|Pro.Forma|All orders|Please|EXPORT|ATTENTION|FOR INVOICE)/i.test(line)) continue;
-    if (/\d{4,}/.test(line) && !/[a-zA-Z]{3,}/.test(line)) continue; // pure numbers
+    if (/^\d/.test(line)) continue;
     if (/@/.test(line)) continue;
-    if (/^Phone|^VAT|^Chamber/i.test(line)) continue;
-
-    // Found a company-like line near the bottom
-    if (/[a-zA-Z]{3,}/.test(line) && line.length > 4) {
-      // Now collect address lines after it
-      const nameCandidate = line;
+    if (/^(COMMERCIAL|PROFORMA|INVOICE|DATE|BUYER|BILL|TO\s*:|Page|Pro.Forma)/i.test(line)) continue;
+    if (/[a-zA-Z]{4,}/.test(line) && line.length > 5) {
       const addrLines = [];
       for (let j = i + 1; j < lines.length && addrLines.length < 4; j++) {
         const al = lines[j].trim();
         if (!al) continue;
-        if (/@/.test(al)) continue;
-        if (/^Phone|^VAT|^Chamber|^Pro.Forma|^Page|^All orders/i.test(al)) break;
-        if (/^\+\d/.test(al)) break; // phone
+        if (/^(COMMERCIAL|PROFORMA|INVOICE|DATE|BUYER|BILL|TO\s*:|Page|Pro.Forma)/i.test(al)) break;
+        if (/@/.test(al)) break;
+        if (/^\d[\d\s\-\+]{5,}$/.test(al)) break;
         addrLines.push(al);
       }
-      if (addrLines.length > 0) {
-        return { name: nameCandidate, address: addrLines.join(" ") };
-      }
+      if (addrLines.length > 0) return { name: line, address: addrLines.join(" ") };
     }
   }
-
-  // Strategy 2: Top of document before BUYER/BILL TO (BMJ style)
-  const stopIdx = lines.findIndex(l => /^(BUYER|BILL\s+TO|TO\s*:|COMMERCIAL|PROFORMA|Pro.Forma)/i.test(l));
-  const topLines = stopIdx > 0 ? lines.slice(0, stopIdx) : lines.slice(0, 8);
-
-  let name = null;
-  const addrLines = [];
-  for (const line of topLines) {
-    if (!line.trim()) continue;
-    if (/^\d[\d\s\-\+\(\)]{4,}$/.test(line)) continue;
-    if (/@/.test(line)) continue;
-    if (/^Phone|^VAT|^Chamber/i.test(line)) continue;
-    if (!name && /[a-zA-Z]{3,}/.test(line)) { name = line; continue; }
-    if (name) addrLines.push(line);
-  }
-  if (name) return { name, address: addrLines.join(" ") };
 
   return { name: null, address: null };
 }
@@ -129,7 +144,7 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "Failed to parse PDF." });
   }
 
-  // ── OCR for image headers (safe, non-crashing) ──
+  // ── OCR for image-based headers ──
   let ocrText = "";
   try {
     const apiKey = process.env.OCR_API_KEY || "helloworld";
@@ -149,106 +164,84 @@ module.exports = async function handler(req, res) {
     } catch(e) {}
   } catch(e) {}
 
-  // OCR first (image headers), then pdf-parse text
+  // OCR first, then pdf-parse
   const combined = ocrText + "\n" + pdfText;
   const lines = combined.split("\n").map(l => l.trim()).filter(l => l.length > 0);
 
-  // ── 1. BENEFICIARY NAME & ADDRESS (seller/issuer) ──
+  // ── Extract fields ──
+
+  // 1. Seller
   const seller = extractSeller(lines);
 
-  // ── 2. BANK NAME ──
-  // "Please pay to" → next line is bank name (IFF style)
-  // "BANK:" → value inline or next line (Sterling/BMJ style)
-  let bankName =
-    getAfterLabel(lines, /^Please\s+pay\s+to$/i) ||  // IFF style — next line
-    getAfterLabel(lines, /^BANK\s*[:\-]/i) ||
-    getAfterLabel(lines, /^Bank\s+[Nn]ame\s*[:\-]/i) ||
-    null;
-
-  // For IFF: "Please pay to" then next line = bank name
-  const payToIdx = lines.findIndex(l => /^Please\s+pay\s+to$/i.test(l));
+  // 2. Bank name
+  let bankName = null;
+  const payToIdx = lines.findIndex(l => /^Please\s+pay\s+to\s*$/i.test(l));
   if (payToIdx >= 0 && lines[payToIdx + 1]) {
     bankName = lines[payToIdx + 1].trim();
+  } else {
+    bankName = getAfterLabel(lines, /^BANK\s*[:\-]/i) ||
+               getAfterLabel(lines, /^Bank\s+[Nn]ame\s*[:\-]/i) || null;
   }
 
-  // ── 3. BANK ADDRESS ──
-  // For IFF: bank name is on line after "Please pay to", 
-  // but bank address is NOT present — just bank name + account + swift
-  // For Sterling: ADDRESS: label
+  // 3. Bank address
   let bankAddress = getAfterLabel(lines, /^ADDRESS\s*[:\-]/i) || null;
-  if (bankAddress) bankAddress = bankAddress.replace(/\s*ABA\s*#.*$/i, "").replace(/,\s*$/, "").trim();
+  if (bankAddress) bankAddress = bankAddress.replace(/\s*ABA\s*#.*$/i,"").replace(/,\s*$/,"").trim();
 
-  // ── 4. ACCOUNT NUMBER ──
-  // IFF: "Bank Account :988456353"
-  // Sterling: "ACCOUNT # 0233683832"
-  // BMJ: "Account Number : USD account: 1730002144278"
+  // 4. Account number
   let accountNo =
     getAfterLabel(lines, /^Bank\s+Account\s*[:\-]/i) ||
-    getAfterLabel(lines, /^ACCOUNT\s*#\s*[:\-]?/i) ||
+    getAfterLabel(lines, /^ACCOUNT\s*#\s*/i) ||
     getAfterLabel(lines, /^Account\s+Number\s*[:\-]/i) ||
-    getAfterLabel(lines, /^Account\s+No\.?\s*[:\-]/i) ||
-    null;
-
-  // Clean "USD account: XXXX" pattern
+    getAfterLabel(lines, /^A\/C\s*(?:No\.?)?\s*[:\-]/i) || null;
   if (accountNo) {
-    const m = accountNo.match(/(?:USD\s+account\s*[:\-]\s*)?([0-9]{6,20})/i);
+    const m = accountNo.match(/([0-9]{6,20})/);
     if (m) accountNo = m[1];
   }
 
-  // ── 5. SWIFT ──
-  // IFF: "Swift code :CHASUS33"
-  // Sterling: "SWIFT: UPNBUS44"
+  // 5. SWIFT
   let swiftCode =
     getAfterLabel(lines, /^Swift\s+code\s*[:\-]/i) ||
     getAfterLabel(lines, /^SWIFT\s+CODE\s*[:\-]/i) ||
     getAfterLabel(lines, /^SWIFT\s*[:\-#]/i) ||
-    getAfterLabel(lines, /^BIC\s*[:\-]/i) ||
-    null;
-  if (swiftCode) swiftCode = swiftCode.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+    getAfterLabel(lines, /^BIC\s*[:\-]/i) || null;
+  if (swiftCode) swiftCode = swiftCode.replace(/[^A-Z0-9]/gi,"").toUpperCase();
 
-  // ── 6. INVOICE NUMBER ──
-  // IFF: "Pro-Forma No. / Date : 9601231931 / 09.04.2026"
-  // Sterling: "INVOICE #: 65117/65117A"
-  // BMJ: "12022026-PMEL-R00"
+  // 6. Invoice number
   let invoiceNo =
-    getAfterLabel(lines, /^INVOICE\s*#\s*[:\-]?/i) ||
+    getAfterLabel(lines, /^INVOICE\s*#\s*/i) ||
     getAfterLabel(lines, /^Invoice\s+No\.?\s*[:\-]/i) ||
-    getAfterLabel(lines, /^INV\s*#\s*[:\-]?/i) ||
-    null;
+    getAfterLabel(lines, /^INV\s*#\s*/i) || null;
 
-  // IFF Pro-Forma style: "Pro-Forma No. / Date : 9601231931 / 09.04.2026"
   if (!invoiceNo) {
-    const proFormaLine = lines.find(l => /Pro.Forma\s+No\.?\s*[\/\s]*Date\s*:/i.test(l));
-    if (proFormaLine) {
-      const m = proFormaLine.match(/:\s*([0-9]+)\s*\//);
+    const proLine = lines.find(l => /Pro.Forma\s+No\.?.*Date\s*:/i.test(l));
+    if (proLine) {
+      const m = proLine.match(/:\s*([0-9]{5,})\s*\//);
       if (m) invoiceNo = m[1];
     }
   }
+  if (invoiceNo) invoiceNo = invoiceNo.split("/")[0].trim();
 
-  // Clean invoice: take only the number part before extra slashes/dates
-  if (invoiceNo) {
-    invoiceNo = invoiceNo.split("/")[0].trim();
-  }
-
-  // ── 7. PURPOSE ──
+  // 7. Purpose
   let purpose = null;
-  const purposeKeywords = [
+  const goodsPatterns = [
     /PERFUME\s+COMPOUND/i, /WASTE\s+PAPER/i, /CIGARETTE\s+PAPER/i,
-    /CORK\s+TIPPING/i, /TEXTILE/i, /FRAGRANCE/i
+    /CORK\s+TIPPING/i, /FRAGRANCE/i, /TEXTILE/i, /CHEMICAL/i
   ];
   for (const line of lines) {
-    for (const kw of purposeKeywords) {
+    for (const kw of goodsPatterns) {
       if (kw.test(line)) {
-        // Clean the line — remove numbers, KG, prices
-        purpose = line.replace(/\d+[\.,]?\d*\s*(KG|MT|PCS|USD|US\$)?/gi, "").replace(/\s+/g, " ").trim();
-        if (purpose.length > 3) break;
+        purpose = line
+          .replace(/\d+[\.,]\d{3}[\.,]?\d*\s*(KG|MT|PCS|USD|US\$)?/gi,"")
+          .replace(/\d+\.\d+\s*(KG|MT)?/gi,"")
+          .replace(/\s+/g," ").trim();
+        if (purpose.length > 4) break;
       }
     }
     if (purpose) break;
   }
   if (!purpose) purpose = getAfterLabel(lines, /^Purpose\s*[:\-]/i) || "IMPORT OF GOODS";
 
-  // ── 8. AMOUNT — always from instruction only ──
+  // 8. Amount — ALWAYS from instruction only
   const amount = parseAmountFromInstruction(instruction);
 
   // ── Build values ──
