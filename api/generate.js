@@ -1,34 +1,37 @@
 const pdfParse = require("pdf-parse");
 
-// ── Extract a specific field from PDF text ──
-function extract(text, patterns, fallback) {
+// Extract a value using multiple regex patterns
+function extract(text, patterns) {
   for (const pattern of patterns) {
     const m = text.match(new RegExp(pattern, "i"));
-    if (m && m[1] && m[1].trim().length > 1) return m[1].trim();
+    if (m) {
+      // Return first captured group, or full match if no group
+      const val = (m[1] || m[0]).trim().replace(/\s+/g, " ");
+      if (val.length > 1) return val;
+    }
   }
-  return fallback || null;
+  return null;
 }
 
-// ── Parse amount from instruction string e.g. "$79576" or "79,576" ──
+// Parse amount from instruction e.g. "$28261" or "$28,261"
 function parseAmountFromInstruction(instruction) {
   const m = instruction.match(/\$?\s*([\d,]+(?:\.\d{1,2})?)/);
   if (m) {
     const num = parseFloat(m[1].replace(/,/g, ""));
-    if (!isNaN(num)) {
-      // Format as 79,576/- style
+    if (!isNaN(num) && num > 0) {
       return num.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + "/-";
     }
   }
   return null;
 }
 
-// ── Fill template lines with extracted values ──
+// Fill template lines with extracted values - only replace if we have a real value
 function fillTemplate(template, values) {
   return template.split("\n").map(line => {
     const colonIdx = line.indexOf(":");
     if (colonIdx === -1) return line;
     const label = line.substring(0, colonIdx).trim().toUpperCase();
-    if (values[label] !== undefined) {
+    if (values[label] && values[label].trim().length > 0) {
       return line.substring(0, colonIdx + 1) + " " + values[label];
     }
     return line;
@@ -48,7 +51,7 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: "Missing pdfBase64 or instruction." });
   }
 
-  // ── Step 1: Parse PDF text ──
+  // ── Step 1: Parse PDF ──
   let pdfText = "";
   try {
     const buf = Buffer.from(pdfBase64, "base64");
@@ -58,92 +61,111 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "Failed to parse PDF: " + err.message });
   }
 
-  if (pdfText.trim().length < 30) {
+  if (pdfText.trim().length < 20) {
     return res.status(400).json({ error: "Could not extract text from this PDF." });
   }
 
-  // ── Step 2: Extract fields directly from PDF text ──
-  const t = pdfText.replace(/\r\n/g, "\n");
+  const t = pdfText.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ");
 
+  // ── Step 2: Extract beneficiary name ──
+  // Could be company name at top of invoice - look for known patterns
   const beneficiaryName = extract(t, [
-    "Beneficiary\\s*[:\\-]+\\s*:?\\s*(PT[^\\n]{3,50})",
-    "(PT\\s+BUKIT\\s+MURIA\\s+JAYA)",
-    "(PT Bukit Muria Jaya)",
-  ], "PT BUKIT MURIA JAYA").toUpperCase();
+    // Look for company name near top - usually before address
+    "(?:Sterling|Finvest|Trading|Corp|Inc|Ltd|LLC|GmbH|PVT)[^\n]{0,40}",
+    // Seller/Beneficiary label
+    "(?:Seller|Beneficiary|Company|From|Shipper)\\s*[:\\-]\\s*([^\\n]{3,60})",
+    // First all-caps line that looks like a company name
+    "^([A-Z][A-Z\\s&.,]{5,50}(?:INC|LTD|LLC|CORP|CO|PVT|SDN|BHD)\\.?)$",
+  ]) || extract(t, [
+    // Fallback: grab first prominent name-like line
+    "([A-Z][A-Za-z\\s&.,]{4,50}(?:Inc|Ltd|LLC|Corp|Co|Pvt)\\.?)",
+  ]);
 
+  // ── Step 3: Extract beneficiary address ──
+  // Look for seller address (not buyer address)
   const beneficiaryAddress = extract(t, [
-    "Jl\\.?\\s+Karawang[^\\n]{5,}(?:\\n[^\\n]{5,}){0,3}",
-    "(JL[\\s\\S]{10,120}INDONESIA)",
-  ], "JL KARAWANG SPOOR KEO TELUK JAMBE P O BOX 64 KW KARAWANG 41300 JAWA BARAT INDONESIA").toUpperCase();
+    // Address near company header (before BUYER section)
+    "([0-9]+[^\\n]{5,80}(?:Suite|Blvd|Boulevard|Street|St|Ave|Road|Rd)[^\\n]{0,60})",
+    "([0-9]+\\s+(?:Satellite|Duluth|GA|USA|UK|Indonesia)[^\\n]{0,80})",
+  ]) || extract(t, [
+    "Address\\s*[:\\-]\\s*([^\\n]{5,100}(?:\\n[^\\n]{5,60}){0,2})",
+  ]);
 
+  // ── Step 4: Extract bank name ──
   const bankName = extract(t, [
-    "Bank\\s+name\\s*[:\\-]+\\s*(PT[^\\n]{5,60})",
-    "(PT\\s+Bank\\s+Mandiri[^\\n]{0,40})",
-  ], "PT BANK MANDIRI (PERSERO) TBK").toUpperCase();
+    "BANK\\s*[:\\-]\\s*([^\\n]{3,60})",
+    "Bank\\s+[Nn]ame\\s*[:\\-]\\s*([^\\n]{3,60})",
+    "([A-Z][A-Za-z\\s]+BANK[^\\n]{0,30})",
+    "(REGIONS\\s+BANK|MANDIRI|BARCLAYS|HSBC|CITIBANK|JP\\s*MORGAN|WELLS\\s+FARGO)[^\\n]{0,30}",
+  ]);
 
+  // ── Step 5: Extract bank address ──
   const bankAddress = extract(t, [
-    "(Karawang\\s+Grand\\s+Taruma[^\\n]{5,120})",
-    "(Ruko\\s+Dharmawangsa[\\s\\S]{5,150}Karawang\\s+[0-9]{5})",
-  ], "KARAWANG GRAND TARUMA. RUKO DHARMAWANGSA II KAV 08 NO. A3-A5 JL. TARUMANAGARA INTERCHANGE KARAWANG BARAT KARAWANG 41314 INDONESIA").toUpperCase();
+    "ADDRESS\\s*[:\\-]\\s*([^\\n]{5,80}(?:\\n[^\\n]{3,60}){0,2})",
+    "(?:Bank\\s+)?Address\\s*[:\\-]\\s*([^\\n]{5,80})",
+  ]);
 
+  // ── Step 6: Extract account number ──
   const accountNo = extract(t, [
-    "USD\\s+account\\s*[:\\-]+\\s*([0-9]{10,20})",
-    "Account\\s+Number\\s*[:\\-]+\\s*(?:USD\\s+account[:\\-]+\\s*)?([0-9]{10,20})",
-    "([0-9]{13})",
-  ], "1730002144278");
+    "ACCOUNT\\s*#\\s*[:\\-]?\\s*([0-9]{6,20})",
+    "Account\\s+(?:No\\.?|Number|#)\\s*[:\\-]?\\s*(?:USD\\s+account[:\\-]+\\s*)?([0-9]{6,20})",
+    "A\\/C\\s*(?:No\\.?|#)?\\s*[:\\-]?\\s*([0-9]{6,20})",
+    "([0-9]{9,16})",
+  ]);
 
+  // ── Step 7: Extract SWIFT ──
   const swiftCode = extract(t, [
-    "Swift\\s+code\\s*[:\\-]+\\s*([A-Z0-9]{6,12})",
-    "SWIFT\\s*[:\\-]+\\s*([A-Z0-9]{6,12})",
-    "(BMRIIDJA)",
-  ], "BMRIIDJA").toUpperCase();
+    "SWIFT\\s*[:\\-#]?\\s*([A-Z0-9]{8,11})",
+    "Swift\\s+[Cc]ode\\s*[:\\-]?\\s*([A-Z0-9]{8,11})",
+    "BIC\\s*[:\\-]?\\s*([A-Z0-9]{8,11})",
+  ]);
 
+  // ── Step 8: Extract invoice number ──
   const invoiceNo = extract(t, [
-    "([0-9]{8}-[A-Z]+-R[0-9]+)",
-    "Invoice\\s+(?:No\\.?|Number)?\\s*[:\\-]+\\s*([A-Z0-9\\-]{5,30})",
-  ], "12022026-PMEL-R00").toUpperCase();
+    "INVOICE\\s*#\\s*[:\\-]?\\s*([A-Z0-9\\/\\-]{3,30})",
+    "Invoice\\s+(?:No\\.?|Number|#)\\s*[:\\-]?\\s*([A-Z0-9\\/\\-]{3,30})",
+    "INV\\s*[:\\-#]?\\s*([A-Z0-9\\/\\-]{3,30})",
+  ]);
 
+  // ── Step 9: Extract purpose from goods description ──
   const purpose = extract(t, [
-    "Purpose\\s*[:\\-]+\\s*([^\\n]{5,80})",
-  ], "IMPORT OF GOODS").toUpperCase();
+    "Purpose\\s*[:\\-]\\s*([^\\n]{5,80})",
+    "(?:PARTICULARS|DESCRIPTION|GOODS)\\s*[^\\n]*\\n+([^\\n]{5,80})",
+    "(WASTE\\s+PAPER[^\\n]{0,40})",
+    "(CIGARETTE\\s+PAPER[^\\n]{0,40})",
+    "(CORK\\s+TIPPING[^\\n]{0,40})",
+    "(?:for|re|re:)\\s+([^\\n]{5,60})",
+  ]) || "IMPORT OF GOODS";
 
-  // ── Step 3: Get amount from INSTRUCTION only (not PDF) ──
-  const amountFromInstruction = parseAmountFromInstruction(instruction);
-  const amount = amountFromInstruction || extract(t, [
+  // ── Step 10: Amount — from instruction first, then PDF ──
+  const amountFromInstr = parseAmountFromInstruction(instruction);
+  const amountFromPDF = extract(t, [
+    "TOTAL\\s+US\\$\\s*([0-9,]+)",
     "TOTAL\\s*\\$?\\s*([0-9,]+(?:\\.[0-9]{2})?)",
+    "Amount\\s+US\\$\\s*([0-9,]+)",
     "\\$\\s*([0-9,]{4,12}(?:\\.[0-9]{2})?)",
-  ], "79,576/-");
+  ]);
+  const amount = amountFromInstr || (amountFromPDF ? amountFromPDF + "/-" : null);
 
-  // ── Step 4: Fill the template ──
+  // ── Step 11: Build values map (only include fields we actually found) ──
+  const values = {};
+  if (beneficiaryName)    values["BENEFICIARY NAME"]         = beneficiaryName.toUpperCase();
+  if (beneficiaryAddress) values["BENEFICIARY ADDRESS"]      = beneficiaryAddress.toUpperCase().replace(/\n/g, " ");
+  if (bankName)           values["BENEFICIARY BANK NAME"]    = bankName.toUpperCase();
+  if (bankAddress)        values["BENEFICIARY BANK ADDRESS"] = bankAddress.toUpperCase().replace(/\n/g, " ");
+  if (accountNo)          values["BENEFICIARY A/C NO"]       = accountNo;
+  if (swiftCode)          values["SWIFT CODE"]               = swiftCode.toUpperCase();
+  if (invoiceNo)          values["INVOICE NO"]               = invoiceNo.toUpperCase();
+  if (purpose)            values["PURPOSE"]                  = purpose.toUpperCase();
+  if (amount)             values["AMOUNT USD"]               = amount;
+
+  // ── Step 12: Fill template or return structured output ──
   if (msgFormat && msgFormat.trim().length > 0) {
-    const values = {
-      "BENEFICIARY NAME":         beneficiaryName,
-      "BENEFICIARY ADDRESS":      beneficiaryAddress,
-      "BENEFICIARY BANK NAME":    bankName,
-      "BENEFICIARY BANK ADDRESS": bankAddress,
-      "BENEFICIARY A/C NO":       accountNo,
-      "SWIFT CODE":               swiftCode,
-      "INVOICE NO":               invoiceNo,
-      "PURPOSE":                  purpose,
-      "AMOUNT USD":               amount,
-    };
-
     const filled = fillTemplate(msgFormat, values);
     return res.status(200).json({ text: filled.trim() });
   }
 
-  // ── No template: return structured summary ──
-  const text = [
-    "BENEFICIARY NAME: " + beneficiaryName,
-    "BENEFICIARY ADDRESS: " + beneficiaryAddress,
-    "BENEFICIARY BANK NAME: " + bankName,
-    "BENEFICIARY BANK ADDRESS: " + bankAddress,
-    "BENEFICIARY A/C NO: " + accountNo,
-    "SWIFT CODE: " + swiftCode,
-    "INVOICE NO: " + invoiceNo,
-    "PURPOSE: " + purpose,
-    "AMOUNT USD: " + amount,
-  ].join("\n\n");
-
-  return res.status(200).json({ text });
+  // No template — return all extracted fields
+  const lines = Object.entries(values).map(([k, v]) => k + ": " + v);
+  return res.status(200).json({ text: lines.join("\n\n") });
 };
