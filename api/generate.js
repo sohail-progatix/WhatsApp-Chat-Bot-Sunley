@@ -33,94 +33,118 @@ function getAfterLabel(lines, labelRegex) {
   return null;
 }
 
-// ── SELLER EXTRACTION — handles 3 invoice layouts ──
-function extractSeller(lines) {
+// Stop words — lines we never want as seller name
+function isJunkLine(line) {
+  return !line ||
+    /^\d[\d\s\-\+\(\)]{4,}$/.test(line) ||   // phone/fax number
+    /@/.test(line) ||                           // email
+    /^\+\d/.test(line) ||                       // phone +31...
+    /^(Chamber|Phone|VAT|Tax|Reg|Page|All orders|Pro.Forma\s+No|Total|Freight|EXPORT|ATTENTION|FOR INVOICE|Line\s+Material)/i.test(line) ||
+    /^(COMMERCIAL|BUYER|BILL\s+TO|SHIP\s+TO|TO\s*:|Please\s+pay|Intermediate)/i.test(line) ||
+    line.length < 4;
+}
+
+// ── SELLER EXTRACTION ──
+function extractSeller(pdfLines) {
 
   // ── LAYOUT A: IFF style ──
-  // Seller block appears AFTER "Pro Forma Invoice Page X of Y" line
-  // Structure: "IFF (NEDERLAND) BV" (short id) → "International Flavors..." (full name) → address
-  const pageMarkerIdx = lines.findIndex(l =>
-    /Pro\s*Forma\s+Invoice\s+Page\s+\d/i.test(l) ||
-    /^Page\s+\d+\s+of\s+\d+/i.test(l)
+  // pdf-parse output has: "Pro Forma Invoice Page 1 of 4" marker
+  // After that: short ID line (all caps, short) → full legal name → address
+  const pageMarkerIdx = pdfLines.findIndex(l =>
+    /Pro\s*Forma\s+Invoice\s+Page\s+\d/i.test(l)
   );
 
   if (pageMarkerIdx >= 0) {
-    const afterPage = lines.slice(pageMarkerIdx + 1);
+    const afterPage = pdfLines.slice(pageMarkerIdx + 1);
     let name = null;
     const addrLines = [];
 
     for (let i = 0; i < afterPage.length; i++) {
       const line = afterPage[i].trim();
       if (!line) continue;
-      if (/^(Chamber|Phone|VAT|Tax|Reg|Total|Freight|EXPORT|ATTENTION|FOR INVOICE|Pro.Forma\s+No)/i.test(line)) break;
-      if (/^\+\d/.test(line)) break;
-      if (/@/.test(line)) break;
+      if (isJunkLine(line)) break;
 
       if (!name) {
-        // If line is short all-caps (letterhead id like "IFF (NEDERLAND) BV")
-        // use the NEXT line as the full legal name
-        if (/^[A-Z0-9\s\(\)\.&\-]{3,30}$/.test(line) && i + 1 < afterPage.length) {
+        // Short all-caps line = letterhead ID → skip it, use next line as real name
+        const isShortCaps = /^[A-Z0-9\s\(\)\.&\-\/]{3,25}$/.test(line);
+        if (isShortCaps && i + 1 < afterPage.length) {
           const nextLine = afterPage[i + 1].trim();
-          if (/[a-z]/.test(nextLine)) { // full name has mixed case
+          // Next line is the full legal name (has lowercase letters)
+          if (/[a-z]/.test(nextLine) && !isJunkLine(nextLine)) {
             name = nextLine;
-            i++; // skip next line
-          } else {
-            name = line;
+            i++; // consumed next line
+            continue;
           }
-        } else {
-          name = line;
         }
+        name = line;
         continue;
       }
+
+      // Collect address lines
+      if (isJunkLine(line)) break;
       addrLines.push(line);
       if (addrLines.length >= 3) break;
     }
+
     if (name && addrLines.length > 0) {
       return { name: name.trim(), address: addrLines.join(" ") };
     }
   }
 
   // ── LAYOUT B: BMJ style ──
-  // Seller at TOP before "TO :" or "BUYER:" or "Pro-Forma No"
-  const stopPatterns = /^(BUYER|BILL\s+TO|TO\s*:|COMMERCIAL\s+INVOICE|PROFORMA|Pro.Forma\s+No|Line\s+Material|DATE\s*:)/i;
-  const stopIdx = lines.findIndex(l => stopPatterns.test(l));
-  const topLines = stopIdx > 2 ? lines.slice(0, stopIdx) : [];
+  // Seller at TOP before "TO :" / "BUYER:" / "Pro-Forma No."
+  const stopIdx = pdfLines.findIndex(l =>
+    /^(BUYER|BILL\s+TO|TO\s*:|Pro.Forma\s+No|Line\s+Material|DATE\s*:|COMMERCIAL\s+INVOICE)/i.test(l)
+  );
+  const topLines = stopIdx > 1 ? pdfLines.slice(0, stopIdx) : [];
 
   if (topLines.length > 0) {
     let name = null;
     const addrLines = [];
     for (const line of topLines) {
-      if (/^\d[\d\s\-\+\(\)]{4,}$/.test(line)) continue;
-      if (/@/.test(line)) continue;
-      if (/^(Phone|VAT|Chamber|Reg)/i.test(line)) continue;
-      if (!name && /[a-zA-Z]{3,}/.test(line)) { name = line; continue; }
-      if (name) addrLines.push(line);
+      if (isJunkLine(line)) continue;
+      if (!name) { name = line; continue; }
+      addrLines.push(line);
     }
     if (name && addrLines.length > 0) return { name, address: addrLines.join(" ") };
   }
 
-  // ── LAYOUT C: OCR image header (Sterling style) ──
-  // OCR gives us the company name as first lines
-  for (let i = 0; i < Math.min(lines.length, 12); i++) {
-    const line = lines[i];
-    if (/^\d/.test(line)) continue;
-    if (/@/.test(line)) continue;
-    if (/^(COMMERCIAL|PROFORMA|INVOICE|DATE|BUYER|BILL|TO\s*:|Page|Pro.Forma)/i.test(line)) continue;
-    if (/[a-zA-Z]{4,}/.test(line) && line.length > 5) {
-      const addrLines = [];
-      for (let j = i + 1; j < lines.length && addrLines.length < 4; j++) {
-        const al = lines[j].trim();
-        if (!al) continue;
-        if (/^(COMMERCIAL|PROFORMA|INVOICE|DATE|BUYER|BILL|TO\s*:|Page|Pro.Forma)/i.test(al)) break;
-        if (/@/.test(al)) break;
-        if (/^\d[\d\s\-\+]{5,}$/.test(al)) break;
-        addrLines.push(al);
+  return { name: null, address: null };
+}
+
+// ── EXTRACT PURPOSE — only goods/product lines ──
+function extractPurpose(lines) {
+  const goodsKeywords = [
+    /PERFUME\s+COMPOUND/i,
+    /WASTE\s+PAPER/i,
+    /CIGARETTE\s+PAPER/i,
+    /CORK\s+TIPPING/i,
+    /FRAGRANCE\s+(?:COMPOUND|OIL|MATERIAL)/i,
+    /TEXTILE/i,
+    /CHEMICAL/i,
+    /FLAVOUR|FLAVOR/i,
+  ];
+
+  for (const line of lines) {
+    // Skip lines that are clearly company/address info
+    if (/Flavors\s*&\s*Fragrances/i.test(line)) continue;
+    if (/International\s+Flavors/i.test(line)) continue;
+    if (/B\.V\.|Inc\.|Ltd\.|LLC/i.test(line)) continue;
+
+    for (const kw of goodsKeywords) {
+      if (kw.test(line)) {
+        // Clean numbers, weights, prices from the line
+        let clean = line
+          .replace(/\d{1,3}(,\d{3})*(\.\d+)?\s*(KG|MT|PCS|USD|US\$|\/\s*KG)?/gi, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        // Remove trailing punctuation
+        clean = clean.replace(/[,\.\-\/]+$/, "").trim();
+        if (clean.length > 4) return clean;
       }
-      if (addrLines.length > 0) return { name: line, address: addrLines.join(" ") };
     }
   }
-
-  return { name: null, address: null };
+  return "IMPORT OF GOODS";
 }
 
 module.exports = async function handler(req, res) {
@@ -135,7 +159,7 @@ module.exports = async function handler(req, res) {
   if (!pdfBase64 || !instruction)
     return res.status(400).json({ error: "Missing pdfBase64 or instruction." });
 
-  // ── Parse PDF ──
+  // ── Parse PDF text only (no OCR — OCR was causing confusion) ──
   let pdfText = "";
   try {
     const parsed = await pdfParse(Buffer.from(pdfBase64, "base64"));
@@ -144,36 +168,49 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "Failed to parse PDF." });
   }
 
-  // ── OCR for image-based headers ──
-  let ocrText = "";
-  try {
-    const apiKey = process.env.OCR_API_KEY || "helloworld";
-    const resp = await fetch("https://api.ocr.space/parse/image", {
-      method: "POST",
-      headers: { "apikey": apiKey, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        base64Image: "data:application/pdf;base64," + pdfBase64,
-        language: "eng", isOverlayRequired: "false",
-        filetype: "PDF", OCREngine: "2"
-      }).toString()
-    });
-    const raw = await resp.text();
+  // ── For Sterling-style PDFs (image header), use OCR only as LAST resort ──
+  const pdfLines = pdfText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+
+  // Check if pdf-parse gave us meaningful seller info
+  // If first 5 lines are all document keywords → likely image header → try OCR
+  const topMeaningful = pdfLines.slice(0, 5).filter(l =>
+    !/^(COMMERCIAL|Pro.Forma|DATE|INVOICE|BUYER|Bill|Ship|Page)/i.test(l) &&
+    /[a-zA-Z]{4,}/.test(l)
+  );
+
+  let ocrLines = [];
+  if (topMeaningful.length === 0) {
+    // Image-based header — use OCR to get seller info
     try {
-      const data = JSON.parse(raw);
-      if (data?.ParsedResults?.[0]?.ParsedText) ocrText = data.ParsedResults[0].ParsedText;
+      const apiKey = process.env.OCR_API_KEY || "helloworld";
+      const resp = await fetch("https://api.ocr.space/parse/image", {
+        method: "POST",
+        headers: { "apikey": apiKey, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          base64Image: "data:application/pdf;base64," + pdfBase64,
+          language: "eng", isOverlayRequired: "false",
+          filetype: "PDF", OCREngine: "2"
+        }).toString()
+      });
+      const raw = await resp.text();
+      try {
+        const data = JSON.parse(raw);
+        if (data?.ParsedResults?.[0]?.ParsedText) {
+          ocrLines = data.ParsedResults[0].ParsedText
+            .split("\n").map(l => l.trim()).filter(l => l.length > 0);
+        }
+      } catch(e) {}
     } catch(e) {}
-  } catch(e) {}
+  }
 
-  // OCR first, then pdf-parse
-  const combined = ocrText + "\n" + pdfText;
-  const lines = combined.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  // Use PDF lines for everything; only use OCR lines for seller if needed
+  const seller = extractSeller(pdfLines) ||
+    (ocrLines.length > 0 ? extractSeller(ocrLines) : { name: null, address: null });
 
-  // ── Extract fields ──
+  // All field extraction uses PDF lines only
+  const lines = pdfLines;
 
-  // 1. Seller
-  const seller = extractSeller(lines);
-
-  // 2. Bank name
+  // ── Bank name ──
   let bankName = null;
   const payToIdx = lines.findIndex(l => /^Please\s+pay\s+to\s*$/i.test(l));
   if (payToIdx >= 0 && lines[payToIdx + 1]) {
@@ -183,11 +220,11 @@ module.exports = async function handler(req, res) {
                getAfterLabel(lines, /^Bank\s+[Nn]ame\s*[:\-]/i) || null;
   }
 
-  // 3. Bank address
+  // ── Bank address ──
   let bankAddress = getAfterLabel(lines, /^ADDRESS\s*[:\-]/i) || null;
   if (bankAddress) bankAddress = bankAddress.replace(/\s*ABA\s*#.*$/i,"").replace(/,\s*$/,"").trim();
 
-  // 4. Account number
+  // ── Account number ──
   let accountNo =
     getAfterLabel(lines, /^Bank\s+Account\s*[:\-]/i) ||
     getAfterLabel(lines, /^ACCOUNT\s*#\s*/i) ||
@@ -198,7 +235,7 @@ module.exports = async function handler(req, res) {
     if (m) accountNo = m[1];
   }
 
-  // 5. SWIFT
+  // ── SWIFT ──
   let swiftCode =
     getAfterLabel(lines, /^Swift\s+code\s*[:\-]/i) ||
     getAfterLabel(lines, /^SWIFT\s+CODE\s*[:\-]/i) ||
@@ -206,7 +243,7 @@ module.exports = async function handler(req, res) {
     getAfterLabel(lines, /^BIC\s*[:\-]/i) || null;
   if (swiftCode) swiftCode = swiftCode.replace(/[^A-Z0-9]/gi,"").toUpperCase();
 
-  // 6. Invoice number
+  // ── Invoice number ──
   let invoiceNo =
     getAfterLabel(lines, /^INVOICE\s*#\s*/i) ||
     getAfterLabel(lines, /^Invoice\s+No\.?\s*[:\-]/i) ||
@@ -221,27 +258,10 @@ module.exports = async function handler(req, res) {
   }
   if (invoiceNo) invoiceNo = invoiceNo.split("/")[0].trim();
 
-  // 7. Purpose
-  let purpose = null;
-  const goodsPatterns = [
-    /PERFUME\s+COMPOUND/i, /WASTE\s+PAPER/i, /CIGARETTE\s+PAPER/i,
-    /CORK\s+TIPPING/i, /FRAGRANCE/i, /TEXTILE/i, /CHEMICAL/i
-  ];
-  for (const line of lines) {
-    for (const kw of goodsPatterns) {
-      if (kw.test(line)) {
-        purpose = line
-          .replace(/\d+[\.,]\d{3}[\.,]?\d*\s*(KG|MT|PCS|USD|US\$)?/gi,"")
-          .replace(/\d+\.\d+\s*(KG|MT)?/gi,"")
-          .replace(/\s+/g," ").trim();
-        if (purpose.length > 4) break;
-      }
-    }
-    if (purpose) break;
-  }
-  if (!purpose) purpose = getAfterLabel(lines, /^Purpose\s*[:\-]/i) || "IMPORT OF GOODS";
+  // ── Purpose ──
+  const purpose = extractPurpose(lines);
 
-  // 8. Amount — ALWAYS from instruction only
+  // ── Amount — ALWAYS from instruction ──
   const amount = parseAmountFromInstruction(instruction);
 
   // ── Build values ──
