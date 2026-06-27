@@ -4,6 +4,8 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>WhatsApp PDF Message Generator</title>
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; }
@@ -12,26 +14,17 @@
   @keyframes wapulse { 0%,80%,100%{opacity:0.3;transform:scale(0.8)} 40%{opacity:1;transform:scale(1)} }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
   .msg-anim { animation: fadeIn 0.25s ease; }
-  .demo-btn { background: linear-gradient(135deg,#FF9800,#F44336); color:#fff; border:none; border-radius:8px; padding:12px 0; font-weight:700; font-size:14px; cursor:pointer; width:100%; transition:opacity 0.2s; }
-  .demo-btn:hover { opacity:0.9; }
-  .demo-btn:disabled { opacity:0.6; cursor:not-allowed; }
   .real-btn { background:#25D366; color:#fff; border:none; border-radius:8px; padding:12px 0; font-weight:700; font-size:14px; cursor:pointer; width:100%; transition:background 0.2s; }
   .real-btn:hover:not(:disabled) { background:#128C7E; }
   .real-btn:disabled { background:#ccc; cursor:not-allowed; }
   .copy-btn { background:none; border:none; cursor:pointer; font-size:11px; color:#888; padding:2px 6px; border-radius:4px; margin-left:4px; }
   .copy-btn:hover { background:#f0f0f0; }
   textarea { resize:vertical; font-family:'Segoe UI',sans-serif; }
-  input,textarea { outline:none; }
-  input:focus, textarea:focus { border-color:#25D366 !important; box-shadow:0 0 0 2px #25D36622; }
-  #root { display:flex; flex-direction:column; min-height:100vh; }
+  input:focus, textarea:focus { outline:none; border-color:#25D366 !important; box-shadow:0 0 0 2px #25D36622; }
 </style>
 </head>
 <body>
 <div id="root"></div>
-
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-
 <script>
 (function() {
   var ACCENT      = "#25D366";
@@ -41,51 +34,44 @@
   var WA_HEADER   = "#075E54";
   var WA_PATTERN  = "url(\"data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23c4b5a0' fill-opacity='0.15'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E\")";
 
-  var DEMO_USER = "📎 PFI.pdf — BMJ Proforma Invoice\n📝 Instruction: Tt pls $79576\nSunley fab copy and msg";
-  var DEMO_BOT  = "BENEFICIARY NAME: PT BUKIT MURIA JAYA\n\nBENEFICIARY ADDRESS: JL KARAWANG SPOOR KEO TELUK JAMBE P O BOX 64 KW KARAWANG 41300 JAWA BARAT INDONESIA\n\nBENEFICIARY BANK NAME: PT BANK MANDIRI (PERSERO) TBK\n\nBENEFICIARY BANK ADDRESS: KARAWANG GRAND TARUMA. RUKO DHARMAWANGSA II KAV 08 NO. A3-A5 JL. TARUMANAGARA INTERCHANGE KARAWANG BARAT KARAWANG 41314 INDONESIA\n\nBENEFICIARY A/C NO: 1730002144278\n\nSWIFT CODE: BMRIIDJA\n\nINVOICE NO: 12022026-PMEL-R00\n\nPURPOSE: IMPORT OF GOODS\n\nAMOUNT USD: 79,576/-";
-
   function getTime() { return new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}); }
-
-  function e(tag, props) {
-    var children = Array.prototype.slice.call(arguments, 2);
-    return React.createElement.apply(React, [tag, props].concat(children.map(function(c){ return Array.isArray(c) ? c : c; })));
-  }
+  function e(tag, props) { var args = [tag, props].concat(Array.prototype.slice.call(arguments, 2)); return React.createElement.apply(React, args); }
 
   function App() {
-    var s = React.useState; var u = React.useRef; var cb = React.useCallback; var ue = React.useEffect;
+    var s = React.useState;
     var pdfFile    = s(null);
     var pdfB64     = s(null);
     var instruction= s("");
     var msgFormat  = s("");
     var messages   = s([]);
     var loading    = s(false);
-    var demoLoad   = s(false);
     var error      = s("");
     var dragging   = s(false);
     var copied     = s(null);
-    var isDemo     = s(false);
-    var fileRef    = u(null);
-    var chatRef    = u(null);
+    var fileRef    = React.useRef(null);
+    var chatRef    = React.useRef(null);
 
-    // shortcuts
     var setPdf=pdfFile[1], pdf=pdfFile[0];
     var setB64=pdfB64[1], b64=pdfB64[0];
     var setInstr=instruction[1], instr=instruction[0];
     var setFmt=msgFormat[1], fmt=msgFormat[0];
     var setMsgs=messages[1], msgs=messages[0];
     var setLoad=loading[1], load=loading[0];
-    var setDL=demoLoad[1], dl=demoLoad[0];
     var setErr=error[1], err=error[0];
     var setDrag=dragging[1], drag=dragging[0];
     var setCopy=copied[1], copy=copied[0];
-    var setDemo=isDemo[1], demo=isDemo[0];
 
     function scrollBottom() {
       setTimeout(function(){ if(chatRef.current) chatRef.current.scrollTop=chatRef.current.scrollHeight; },80);
     }
 
     function readPDF(file) {
-      return new Promise(function(res,rej){ var r=new FileReader(); r.onload=function(){ res(r.result.split(",")[1]); }; r.onerror=rej; r.readAsDataURL(file); });
+      return new Promise(function(res,rej){
+        var r=new FileReader();
+        r.onload=function(){ res(r.result.split(",")[1]); };
+        r.onerror=rej;
+        r.readAsDataURL(file);
+      });
     }
 
     function handleFile(file) {
@@ -95,7 +81,11 @@
     }
 
     function copyText(text,idx) {
-      var fb=function(){ var t=document.createElement("textarea"); t.value=text; document.body.appendChild(t); t.select(); document.execCommand("copy"); document.body.removeChild(t); };
+      var fb=function(){
+        var t=document.createElement("textarea"); t.value=text;
+        document.body.appendChild(t); t.select();
+        document.execCommand("copy"); document.body.removeChild(t);
+      };
       if(navigator.clipboard) navigator.clipboard.writeText(text).catch(fb); else fb();
       setCopy(idx); setTimeout(function(){ setCopy(null); },1800);
     }
@@ -105,28 +95,19 @@
       copyText(all,"all");
     }
 
-    function runDemo() {
-      setErr(""); setMsgs([]); setDL(true); setDemo(true);
-      setMsgs([{role:"user",text:DEMO_USER,time:getTime()}]);
-      scrollBottom();
-      setTimeout(function(){
-        setMsgs(function(p){ return p.concat([{role:"bot",text:DEMO_BOT,time:getTime(),idx:1}]); });
-        setDL(false); scrollBottom();
-      },2400);
-    }
-
     function generate() {
       if(!b64){ setErr("Please upload a PDF file."); return; }
       if(!instr.trim()){ setErr("Please enter an instruction."); return; }
-      setErr(""); setLoad(true); setDemo(false);
-      var userMsg={role:"user",time:getTime(),text:"📎 "+(pdf?pdf.name:"")+"\n📝 Instruction: "+instr+(fmt?"\n\n📋 Format:\n"+fmt:"")};
+      setErr(""); setLoad(true);
+      var userMsg={role:"user",time:getTime(),text:"📎 "+(pdf?pdf.name:"")+"\n📝 "+instr+(fmt?"\n\n📋 Format provided":"")};
       setMsgs(function(p){return p.concat([userMsg]);});
       scrollBottom();
       fetch("/api/generate",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({pdfBase64:b64,instruction:instr,msgFormat:fmt})
-      }).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d};});})
+      })
+      .then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d};});})
       .then(function(res){
         if(!res.ok) throw new Error(res.d.error||"Server error.");
         var raw=res.d.text||"";
@@ -137,20 +118,20 @@
           : [{role:"bot",text:raw.trim(),time:getTime(),idx:1}];
         setMsgs(function(p){return p.concat(bots);});
         scrollBottom();
-      }).catch(function(e){
-        setErr(e.message||"Something went wrong.");
+      })
+      .catch(function(ex){
+        setErr(ex.message||"Something went wrong.");
         setMsgs(function(p){return p.slice(0,-1);});
-      }).finally(function(){ setLoad(false); });
+      })
+      .finally(function(){ setLoad(false); });
     }
 
-    var botMsgs=msgs.filter(function(m){return m.role==="bot";});
-    var isTyping=load||dl;
-    var canGen=!load&&!!b64&&!!instr.trim();
+    var botMsgs = msgs.filter(function(m){return m.role==="bot";});
+    var canGen  = !load && !!b64 && !!instr.trim();
 
-    // ── RENDER ──
     return e("div",{style:{display:"flex",flexDirection:"column",minHeight:"100vh"}},
 
-      // HEADER
+      // ── HEADER ──
       e("div",{style:{background:WA_HEADER,color:"#fff",padding:"14px 20px",display:"flex",alignItems:"center",gap:12,boxShadow:"0 2px 6px rgba(0,0,0,0.25)",flexShrink:0}},
         e("div",{style:{width:40,height:40,borderRadius:"50%",background:ACCENT,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}},"📄"),
         e("div",{style:{flex:1}},
@@ -162,31 +143,17 @@
         )
       ),
 
-      // BODY
+      // ── BODY ──
       e("div",{style:{flex:1,display:"flex",gap:16,padding:16,maxWidth:1140,margin:"0 auto",width:"100%",boxSizing:"border-box"}},
 
-        // LEFT PANEL
+        // ── LEFT PANEL ──
         e("div",{style:{width:330,flexShrink:0,background:"#fff",borderRadius:12,boxShadow:"0 1px 4px rgba(0,0,0,0.1)",display:"flex",flexDirection:"column",overflow:"hidden"}},
           e("div",{style:{background:WA_HEADER,color:"#fff",padding:"10px 16px",fontSize:13,fontWeight:700}},"⚙️ CONFIGURATION"),
           e("div",{style:{padding:16,flex:1,display:"flex",flexDirection:"column",gap:14,overflowY:"auto"}},
 
-            // Demo banner
-            e("div",{style:{background:"#fff8e1",border:"1.5px solid #FFB300",borderRadius:10,padding:"10px 13px",fontSize:12,color:"#795548",display:"flex",gap:9,alignItems:"flex-start"}},
-              e("span",{style:{fontSize:20,lineHeight:1}},"🎯"),
-              e("div",null,e("strong",null,"Demo Mode")," — no setup needed!",e("br"),e("span",{style:{color:"#aaa"}},"Shows the BMJ invoice workflow instantly."))
-            ),
-            e("button",{className:"demo-btn",onClick:runDemo,disabled:dl},dl?"⏳  Running Demo...":"🚀  Try Demo — One Click"),
-
-            // Divider
-            e("div",{style:{display:"flex",alignItems:"center",gap:8,color:"#bbb",fontSize:11}},
-              e("div",{style:{flex:1,height:1,background:"#e8e8e8"}}),
-              "OR USE YOUR OWN PDF",
-              e("div",{style:{flex:1,height:1,background:"#e8e8e8"}})
-            ),
-
-            // Secure badge
+            // OSITS badge
             e("div",{style:{background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#2e7d32",display:"flex",alignItems:"center",gap:8}},
-              "🔒 Secured · Powered by Google Gemini"
+              "⚡ Powered by OSITS"
             ),
 
             // PDF Upload
@@ -197,11 +164,11 @@
                 onDragLeave:function(){setDrag(false);},
                 onDrop:function(ev){ev.preventDefault();setDrag(false);handleFile(ev.dataTransfer.files[0]);},
                 onClick:function(){fileRef.current&&fileRef.current.click();},
-                style:{border:"2px dashed "+(drag?ACCENT:b64?ACCENT_DARK:"#ccc"),borderRadius:10,padding:"18px 14px",textAlign:"center",cursor:"pointer",background:b64||drag?"#f0fff4":"#fafafa",transition:"all 0.2s"}
+                style:{border:"2px dashed "+(drag?ACCENT:b64?ACCENT_DARK:"#ccc"),borderRadius:10,padding:"22px 14px",textAlign:"center",cursor:"pointer",background:b64||drag?"#f0fff4":"#fafafa",transition:"all 0.2s"}
               },
-                e("div",{style:{fontSize:28,marginBottom:4}},b64?"✅":"📂"),
+                e("div",{style:{fontSize:30,marginBottom:6}},b64?"✅":"📂"),
                 e("div",{style:{fontSize:13,color:"#555"}},b64?(pdf?pdf.name:""):"Drag & drop or click to browse"),
-                e("div",{style:{fontSize:11,color:"#999",marginTop:3}},b64&&pdf?(pdf.size/1024).toFixed(1)+" KB":"Invoices · Contracts · Quotes"),
+                e("div",{style:{fontSize:11,color:"#999",marginTop:4}},b64&&pdf?(pdf.size/1024).toFixed(1)+" KB":"Invoices · Contracts · Quotes"),
                 e("input",{ref:fileRef,type:"file",accept:".pdf",style:{display:"none"},onChange:function(ev){handleFile(ev.target.files[0]);}})
               ),
               b64&&pdf&&e("div",{style:{display:"flex",alignItems:"center",gap:8,background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:8,padding:"6px 10px",fontSize:12,color:"#2e7d32",marginTop:6}},
@@ -214,61 +181,68 @@
             // Instruction
             e("div",null,
               e("label",{style:{fontSize:12,fontWeight:700,color:"#555",marginBottom:5,display:"block"}},"📝 INSTRUCTION"),
-              e("textarea",{value:instr,onChange:function(ev){setInstr(ev.target.value);},placeholder:"e.g. Tt pls $79576\nSunley fab copy and msg",style:{width:"100%",border:"1.5px solid #ddd",borderRadius:8,padding:"10px 12px",fontSize:13,minHeight:70}})
+              e("textarea",{
+                value:instr,
+                onChange:function(ev){setInstr(ev.target.value);},
+                placeholder:"e.g. Tt pls $79576\nSunley fab copy and msg",
+                style:{width:"100%",border:"1.5px solid #ddd",borderRadius:8,padding:"10px 12px",fontSize:13,minHeight:75}
+              })
             ),
 
-            // Message format
+            // Message Format
             e("div",null,
               e("label",{style:{fontSize:12,fontWeight:700,color:"#555",marginBottom:5,display:"block"}},
                 "📋 MESSAGE FORMAT ",e("span",{style:{fontWeight:400,color:"#aaa"}},"(optional)")
               ),
-              e("textarea",{value:fmt,onChange:function(ev){setFmt(ev.target.value);},placeholder:"Paste your required message template...\ne.g.\nBENEFICIARY NAME: ...\nBANK NAME: ...",style:{width:"100%",border:"1.5px solid #ddd",borderRadius:8,padding:"10px 12px",fontSize:12,fontFamily:"monospace",minHeight:100}})
+              e("textarea",{
+                value:fmt,
+                onChange:function(ev){setFmt(ev.target.value);},
+                placeholder:"Paste your message template...\ne.g.\nBENEFICIARY NAME:\nBANK NAME:\nACCOUNT NO:\nSWIFT CODE:\nAMOUNT USD:",
+                style:{width:"100%",border:"1.5px solid #ddd",borderRadius:8,padding:"10px 12px",fontSize:12,fontFamily:"monospace",minHeight:120}
+              })
             ),
 
             err&&e("div",{style:{background:"#fff3f3",border:"1px solid #ffcdd2",borderRadius:8,padding:"10px 12px",fontSize:12,color:"#c62828"}},"⚠️ "+err),
 
-            e("button",{className:"real-btn",onClick:generate,disabled:!canGen},load?"⏳  Generating...":"✉️  Generate WhatsApp Messages"),
+            e("button",{className:"real-btn",onClick:generate,disabled:!canGen},
+              load?"⏳  Generating...":"✉️  Generate WhatsApp Message"
+            ),
 
             botMsgs.length>0&&e("div",{style:{fontSize:11,color:"#999",textAlign:"center"}},
-              demo&&e("span",{style:{background:"#FF9800",color:"#fff",fontSize:10,fontWeight:700,borderRadius:6,padding:"2px 7px",marginRight:6}},"DEMO"),
               botMsgs.length+" message"+(botMsgs.length>1?"s":"")+" generated"
             )
           )
         ),
 
-        // RIGHT CHAT
+        // ── RIGHT: CHAT ──
         e("div",{style:{flex:1,minWidth:0,background:"#fff",borderRadius:12,boxShadow:"0 1px 4px rgba(0,0,0,0.1)",display:"flex",flexDirection:"column",overflow:"hidden"}},
 
-          // Chat header
+          // WhatsApp chat header
           e("div",{style:{background:WA_HEADER,color:"#fff",padding:"10px 16px",display:"flex",alignItems:"center",gap:12,flexShrink:0}},
             e("div",{style:{width:38,height:38,borderRadius:"50%",background:"rgba(255,255,255,0.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}},"👤"),
             e("div",{style:{flex:1}},
-              e("div",{style:{fontWeight:700,fontSize:15}},
-                "Payment Team ",
-                demo&&e("span",{style:{background:"#FF9800",color:"#fff",fontSize:10,fontWeight:700,borderRadius:6,padding:"2px 7px",marginLeft:8}},"DEMO")
-              ),
-              e("div",{style:{fontSize:11,opacity:0.8}},isTyping?"typing...":msgs.length>0?"online":"last seen today")
+              e("div",{style:{fontWeight:700,fontSize:15}},"Payment Team"),
+              e("div",{style:{fontSize:11,opacity:0.8}},load?"typing...":msgs.length>0?"online":"last seen today")
             ),
             e("div",{style:{display:"flex",gap:16,opacity:0.75,fontSize:20}},"📞 📹 ⋮")
           ),
 
-          // Messages area
+          // Messages
           e("div",{ref:chatRef,style:{flex:1,background:WA_BG,backgroundImage:WA_PATTERN,padding:16,overflowY:"auto",display:"flex",flexDirection:"column",gap:10}},
             msgs.length===0
               ? e("div",{style:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:"#bbb",gap:12,paddingTop:80}},
                   e("div",{style:{fontSize:64,opacity:0.25}},"💬"),
                   e("div",{style:{fontSize:15,fontWeight:600,color:"#aaa"}},"No messages yet"),
-                  e("div",{style:{fontSize:12}},"Click \"Try Demo\" or upload a PDF to get started")
+                  e("div",{style:{fontSize:12}},"Upload a PDF and add your instruction to get started")
                 )
-              : [
-                  e("div",{key:"today",style:{textAlign:"center",fontSize:11,color:"#888",background:"rgba(255,255,255,0.7)",borderRadius:10,padding:"3px 14px",alignSelf:"center"}},"Today")
-                ].concat(msgs.map(function(msg,i){
+              : [e("div",{key:"today",style:{textAlign:"center",fontSize:11,color:"#888",background:"rgba(255,255,255,0.7)",borderRadius:10,padding:"3px 14px",alignSelf:"center"}},"Today")]
+                .concat(msgs.map(function(msg,i){
                   return e("div",{key:i,className:"msg-anim"},
                     msg.role==="bot"&&msg.idx>1&&e("div",{style:{textAlign:"center",fontSize:11,color:"#888",background:"rgba(255,255,255,0.7)",borderRadius:10,padding:"3px 14px",margin:"6px auto",width:"fit-content"}},"Message "+msg.idx),
                     e("div",{style:{display:"flex",justifyContent:msg.role==="bot"?"flex-end":"flex-start",alignItems:"flex-end",gap:8}},
                       msg.role==="user"&&e("div",{style:{width:30,height:30,borderRadius:"50%",background:WA_HEADER,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"#fff",flexShrink:0,marginBottom:2}},"🧑"),
                       e("div",{style:{maxWidth:"76%",background:msg.role==="bot"?WA_BUBBLE:"#fff",borderRadius:msg.role==="bot"?"12px 2px 12px 12px":"2px 12px 12px 12px",padding:"10px 13px 6px",boxShadow:"0 1px 2px rgba(0,0,0,0.13)"}},
-                        e("p",{style:{fontSize:13.5,color:"#111",whiteSpace:"pre-wrap",lineHeight:1.58,margin:0}},msg.text),
+                        e("p",{style:{fontSize:13.5,color:"#111",whiteSpace:"pre-wrap",lineHeight:1.58,margin:0,fontFamily:"'Segoe UI',sans-serif"}},msg.text),
                         e("div",{style:{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:4,marginTop:5}},
                           e("span",{style:{fontSize:10.5,color:"#888"}},msg.time),
                           msg.role==="bot"&&e("span",{style:{fontSize:13,color:ACCENT_DARK}},"✓✓"),
@@ -278,29 +252,32 @@
                       msg.role==="bot"&&e("div",{style:{width:30,height:30,borderRadius:"50%",background:WA_HEADER,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"#fff",flexShrink:0,marginBottom:2}},"🤖")
                     )
                   );
-                })).concat(
-                  isTyping?[e("div",{key:"typing",style:{display:"flex",justifyContent:"flex-end",alignItems:"flex-end",gap:8}},
-                    e("div",{style:{background:WA_BUBBLE,borderRadius:"12px 2px 12px 12px",padding:"12px 16px",boxShadow:"0 1px 2px rgba(0,0,0,0.1)",opacity:0.8,display:"flex",alignItems:"center",gap:6}},
-                      [0,1,2].map(function(i){return e("span",{key:i,style:{width:7,height:7,borderRadius:"50%",background:"#aaa",display:"inline-block",animation:"wapulse 1.2s "+(i*0.2)+"s infinite"}});}),
-                      e("span",{style:{fontSize:13,color:"#999",marginLeft:4}},"Analyzing PDF...")
-                    ),
-                    e("div",{style:{width:30,height:30,borderRadius:"50%",background:WA_HEADER,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"#fff",flexShrink:0}},"🤖")
-                  )]:[]
-                )
+                }))
+                .concat(load?[e("div",{key:"typing",style:{display:"flex",justifyContent:"flex-end",alignItems:"flex-end",gap:8}},
+                  e("div",{style:{background:WA_BUBBLE,borderRadius:"12px 2px 12px 12px",padding:"12px 16px",boxShadow:"0 1px 2px rgba(0,0,0,0.1)",opacity:0.8,display:"flex",alignItems:"center",gap:6}},
+                    [0,1,2].map(function(i){return e("span",{key:i,style:{width:7,height:7,borderRadius:"50%",background:"#aaa",display:"inline-block",animation:"wapulse 1.2s "+(i*0.2)+"s infinite"}});}),
+                    e("span",{style:{fontSize:13,color:"#999",marginLeft:4}},"Analyzing PDF...")
+                  ),
+                  e("div",{style:{width:30,height:30,borderRadius:"50%",background:WA_HEADER,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"#fff",flexShrink:0}},"🤖")
+                )]:[])
           ),
 
           // Status bar
           e("div",{style:{background:"#f5f5f5",borderTop:"1px solid #e0e0e0",padding:"8px 16px",fontSize:12,color:"#666",display:"flex",alignItems:"center",gap:8,flexShrink:0}},
-            e("span",{style:{width:8,height:8,borderRadius:"50%",background:demo?"#FF9800":b64?ACCENT:"#ccc",display:"inline-block"}}),
-            e("span",null,demo?"Demo: PFI.pdf (BMJ Proforma Invoice)":pdf?pdf.name:"No PDF loaded"),
-            e("span",{style:{marginLeft:"auto",color:"#bbb"}},(botMsgs.length>0?botMsgs.length+" msg ready · ":" ")+"Powered by Google Gemini")
+            e("span",{style:{width:8,height:8,borderRadius:"50%",background:b64?ACCENT:"#ccc",display:"inline-block"}}),
+            e("span",null,pdf?pdf.name:"No PDF loaded"),
+            e("span",{style:{marginLeft:"auto",color:"#bbb"}},(botMsgs.length>0?botMsgs.length+" msg ready · ":" ")+"Powered by OSITS")
           )
         )
       )
     );
   }
 
-  ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  if (typeof ReactDOM === "undefined") {
+    document.getElementById("root").innerHTML = "<div style='padding:40px;text-align:center;color:#e53935;font-size:16px;'>❌ Failed to load React. Please refresh the page.</div>";
+  } else {
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  }
 })();
 </script>
 </body>
