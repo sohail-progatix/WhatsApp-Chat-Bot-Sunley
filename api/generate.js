@@ -21,130 +21,92 @@ function fillTemplate(template, values) {
   }).join("\n");
 }
 
-function getAfterLabel(lines, labelRegex) {
-  for (let i = 0; i < lines.length; i++) {
-    if (labelRegex.test(lines[i])) {
-      const colonIdx = lines[i].lastIndexOf(":");
-      const inline = lines[i].substring(colonIdx + 1).trim();
-      if (inline.length > 1) return inline;
-      if (i + 1 < lines.length) return lines[i + 1].trim();
+// ── Call OpenRouter AI to extract fields from raw PDF text ──
+async function extractFieldsWithAI(rawText, apiKey) {
+  const systemPrompt = `You are a payment document parser. Extract payment fields from invoice text.
+Return ONLY a JSON object with these exact keys (use null if not found):
+{
+  "beneficiary_name": "company name of the SELLER/SUPPLIER (not the buyer)",
+  "beneficiary_address": "full address of the SELLER/SUPPLIER (not the buyer)",
+  "bank_name": "beneficiary bank name",
+  "bank_address": "beneficiary bank address (if available)",
+  "account_no": "bank account number (digits only)",
+  "swift_code": "SWIFT/BIC code",
+  "invoice_no": "invoice or pro-forma number",
+  "purpose": "goods description (what is being sold, e.g. PERFUME COMPOUND, WASTE PAPER)"
+}
+
+RULES:
+- beneficiary_name is the ISSUER of the invoice (seller), NOT the buyer/bill-to party
+- For purpose: use the main goods description, not company names
+- account_no: digits only, no spaces or labels
+- Return ONLY valid JSON, no explanation, no markdown`;
+
+  const userPrompt = `Extract payment fields from this invoice text:\n\n${rawText.substring(0, 6000)}`;
+
+  const models = [
+    "openrouter/auto",
+    "meta-llama/llama-3.3-70b:free",
+    "meta-llama/llama-3.1-8b:free",
+    "mistralai/mistral-7b-instruct:free"
+  ];
+
+  for (const model of models) {
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://msg-bot-psi.vercel.app",
+          "X-Title": "WhatsApp PDF Message Generator"
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ],
+          max_tokens: 500,
+          temperature: 0.0
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) continue;
+
+      let text = data.choices?.[0]?.message?.content || "";
+      // Strip markdown code blocks if present
+      text = text.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+
+      const parsed = JSON.parse(text);
+      return parsed;
+    } catch(e) {
+      continue;
     }
   }
   return null;
 }
 
-// Stop words — lines we never want as seller name
-function isJunkLine(line) {
-  return !line ||
-    /^\d[\d\s\-\+\(\)]{4,}$/.test(line) ||   // phone/fax number
-    /@/.test(line) ||                           // email
-    /^\+\d/.test(line) ||                       // phone +31...
-    /^(Chamber|Phone|VAT|Tax|Reg|Page|All orders|Pro.Forma\s+No|Total|Freight|EXPORT|ATTENTION|FOR INVOICE|Line\s+Material)/i.test(line) ||
-    /^(COMMERCIAL|BUYER|BILL\s+TO|SHIP\s+TO|TO\s*:|Please\s+pay|Intermediate)/i.test(line) ||
-    line.length < 4;
-}
-
-// ── SELLER EXTRACTION ──
-function extractSeller(pdfLines) {
-
-  // ── LAYOUT A: IFF style ──
-  // pdf-parse output has: "Pro Forma Invoice Page 1 of 4" marker
-  // After that: short ID line (all caps, short) → full legal name → address
-  const pageMarkerIdx = pdfLines.findIndex(l =>
-    /Pro\s*Forma\s+Invoice\s+Page\s+\d/i.test(l)
-  );
-
-  if (pageMarkerIdx >= 0) {
-    const afterPage = pdfLines.slice(pageMarkerIdx + 1);
-    let name = null;
-    const addrLines = [];
-
-    for (let i = 0; i < afterPage.length; i++) {
-      const line = afterPage[i].trim();
-      if (!line) continue;
-      if (isJunkLine(line)) break;
-
-      if (!name) {
-        // Short all-caps line = letterhead ID → skip it, use next line as real name
-        const isShortCaps = /^[A-Z0-9\s\(\)\.&\-\/]{3,25}$/.test(line);
-        if (isShortCaps && i + 1 < afterPage.length) {
-          const nextLine = afterPage[i + 1].trim();
-          // Next line is the full legal name (has lowercase letters)
-          if (/[a-z]/.test(nextLine) && !isJunkLine(nextLine)) {
-            name = nextLine;
-            i++; // consumed next line
-            continue;
-          }
-        }
-        name = line;
-        continue;
-      }
-
-      // Collect address lines
-      if (isJunkLine(line)) break;
-      addrLines.push(line);
-      if (addrLines.length >= 3) break;
-    }
-
-    if (name && addrLines.length > 0) {
-      return { name: name.trim(), address: addrLines.join(" ") };
-    }
+// ── Get OCR text from ocr.space ──
+async function getOCRText(pdfBase64) {
+  try {
+    const apiKey = process.env.OCR_API_KEY || "helloworld";
+    const resp = await fetch("https://api.ocr.space/parse/image", {
+      method: "POST",
+      headers: { "apikey": apiKey, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        base64Image: "data:application/pdf;base64," + pdfBase64,
+        language: "eng", isOverlayRequired: "false",
+        filetype: "PDF", OCREngine: "2", scale: "true"
+      }).toString()
+    });
+    const raw = await resp.text();
+    const data = JSON.parse(raw);
+    return data?.ParsedResults?.map(r => r.ParsedText || "").join("\n") || "";
+  } catch(e) {
+    return "";
   }
-
-  // ── LAYOUT B: BMJ style ──
-  // Seller at TOP before "TO :" / "BUYER:" / "Pro-Forma No."
-  const stopIdx = pdfLines.findIndex(l =>
-    /^(BUYER|BILL\s+TO|TO\s*:|Pro.Forma\s+No|Line\s+Material|DATE\s*:|COMMERCIAL\s+INVOICE)/i.test(l)
-  );
-  const topLines = stopIdx > 1 ? pdfLines.slice(0, stopIdx) : [];
-
-  if (topLines.length > 0) {
-    let name = null;
-    const addrLines = [];
-    for (const line of topLines) {
-      if (isJunkLine(line)) continue;
-      if (!name) { name = line; continue; }
-      addrLines.push(line);
-    }
-    if (name && addrLines.length > 0) return { name, address: addrLines.join(" ") };
-  }
-
-  return { name: null, address: null };
-}
-
-// ── EXTRACT PURPOSE — only goods/product lines ──
-function extractPurpose(lines) {
-  const goodsKeywords = [
-    /PERFUME\s+COMPOUND/i,
-    /WASTE\s+PAPER/i,
-    /CIGARETTE\s+PAPER/i,
-    /CORK\s+TIPPING/i,
-    /FRAGRANCE\s+(?:COMPOUND|OIL|MATERIAL)/i,
-    /TEXTILE/i,
-    /CHEMICAL/i,
-    /FLAVOUR|FLAVOR/i,
-  ];
-
-  for (const line of lines) {
-    // Skip lines that are clearly company/address info
-    if (/Flavors\s*&\s*Fragrances/i.test(line)) continue;
-    if (/International\s+Flavors/i.test(line)) continue;
-    if (/B\.V\.|Inc\.|Ltd\.|LLC/i.test(line)) continue;
-
-    for (const kw of goodsKeywords) {
-      if (kw.test(line)) {
-        // Clean numbers, weights, prices from the line
-        let clean = line
-          .replace(/\d{1,3}(,\d{3})*(\.\d+)?\s*(KG|MT|PCS|USD|US\$|\/\s*KG)?/gi, "")
-          .replace(/\s+/g, " ")
-          .trim();
-        // Remove trailing punctuation
-        clean = clean.replace(/[,\.\-\/]+$/, "").trim();
-        if (clean.length > 4) return clean;
-      }
-    }
-  }
-  return "IMPORT OF GOODS";
 }
 
 module.exports = async function handler(req, res) {
@@ -155,129 +117,56 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
   if (req.method !== "POST")    { res.status(405).json({ error: "Method not allowed" }); return; }
 
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  if (!openRouterKey) return res.status(500).json({ error: "OPENROUTER_API_KEY not configured." });
+
   const { pdfBase64, instruction, msgFormat } = req.body;
   if (!pdfBase64 || !instruction)
     return res.status(400).json({ error: "Missing pdfBase64 or instruction." });
 
-  // ── Parse PDF text only (no OCR — OCR was causing confusion) ──
+  // ── Step 1: Extract text via pdf-parse ──
   let pdfText = "";
   try {
     const parsed = await pdfParse(Buffer.from(pdfBase64, "base64"));
     pdfText = parsed.text || "";
-  } catch(e) {
-    return res.status(500).json({ error: "Failed to parse PDF." });
-  }
+  } catch(e) {}
 
-  // ── For Sterling-style PDFs (image header), use OCR only as LAST resort ──
-  const pdfLines = pdfText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  // ── Step 2: OCR for image-based content ──
+  let ocrText = "";
+  try {
+    ocrText = await getOCRText(pdfBase64);
+  } catch(e) {}
 
-  // Check if pdf-parse gave us meaningful seller info
-  // If first 5 lines are all document keywords → likely image header → try OCR
-  const topMeaningful = pdfLines.slice(0, 5).filter(l =>
-    !/^(COMMERCIAL|Pro.Forma|DATE|INVOICE|BUYER|Bill|Ship|Page)/i.test(l) &&
-    /[a-zA-Z]{4,}/.test(l)
-  );
+  // ── Step 3: Combine both — OCR first captures image headers ──
+  const combinedText = [ocrText, pdfText].filter(Boolean).join("\n\n--- PDF TEXT ---\n\n");
 
-  let ocrLines = [];
-  if (topMeaningful.length === 0) {
-    // Image-based header — use OCR to get seller info
-    try {
-      const apiKey = process.env.OCR_API_KEY || "helloworld";
-      const resp = await fetch("https://api.ocr.space/parse/image", {
-        method: "POST",
-        headers: { "apikey": apiKey, "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          base64Image: "data:application/pdf;base64," + pdfBase64,
-          language: "eng", isOverlayRequired: "false",
-          filetype: "PDF", OCREngine: "2"
-        }).toString()
-      });
-      const raw = await resp.text();
-      try {
-        const data = JSON.parse(raw);
-        if (data?.ParsedResults?.[0]?.ParsedText) {
-          ocrLines = data.ParsedResults[0].ParsedText
-            .split("\n").map(l => l.trim()).filter(l => l.length > 0);
-        }
-      } catch(e) {}
-    } catch(e) {}
-  }
+  if (combinedText.trim().length < 20)
+    return res.status(400).json({ error: "Could not extract text from PDF." });
 
-  // Use PDF lines for everything; only use OCR lines for seller if needed
-  const seller = extractSeller(pdfLines) ||
-    (ocrLines.length > 0 ? extractSeller(ocrLines) : { name: null, address: null });
+  // ── Step 4: AI extracts all fields intelligently ──
+  const fields = await extractFieldsWithAI(combinedText, openRouterKey);
 
-  // All field extraction uses PDF lines only
-  const lines = pdfLines;
+  if (!fields)
+    return res.status(500).json({ error: "AI could not parse the document. Please try again." });
 
-  // ── Bank name ──
-  let bankName = null;
-  const payToIdx = lines.findIndex(l => /^Please\s+pay\s+to\s*$/i.test(l));
-  if (payToIdx >= 0 && lines[payToIdx + 1]) {
-    bankName = lines[payToIdx + 1].trim();
-  } else {
-    bankName = getAfterLabel(lines, /^BANK\s*[:\-]/i) ||
-               getAfterLabel(lines, /^Bank\s+[Nn]ame\s*[:\-]/i) || null;
-  }
-
-  // ── Bank address ──
-  let bankAddress = getAfterLabel(lines, /^ADDRESS\s*[:\-]/i) || null;
-  if (bankAddress) bankAddress = bankAddress.replace(/\s*ABA\s*#.*$/i,"").replace(/,\s*$/,"").trim();
-
-  // ── Account number ──
-  let accountNo =
-    getAfterLabel(lines, /^Bank\s+Account\s*[:\-]/i) ||
-    getAfterLabel(lines, /^ACCOUNT\s*#\s*/i) ||
-    getAfterLabel(lines, /^Account\s+Number\s*[:\-]/i) ||
-    getAfterLabel(lines, /^A\/C\s*(?:No\.?)?\s*[:\-]/i) || null;
-  if (accountNo) {
-    const m = accountNo.match(/([0-9]{6,20})/);
-    if (m) accountNo = m[1];
-  }
-
-  // ── SWIFT ──
-  let swiftCode =
-    getAfterLabel(lines, /^Swift\s+code\s*[:\-]/i) ||
-    getAfterLabel(lines, /^SWIFT\s+CODE\s*[:\-]/i) ||
-    getAfterLabel(lines, /^SWIFT\s*[:\-#]/i) ||
-    getAfterLabel(lines, /^BIC\s*[:\-]/i) || null;
-  if (swiftCode) swiftCode = swiftCode.replace(/[^A-Z0-9]/gi,"").toUpperCase();
-
-  // ── Invoice number ──
-  let invoiceNo =
-    getAfterLabel(lines, /^INVOICE\s*#\s*/i) ||
-    getAfterLabel(lines, /^Invoice\s+No\.?\s*[:\-]/i) ||
-    getAfterLabel(lines, /^INV\s*#\s*/i) || null;
-
-  if (!invoiceNo) {
-    const proLine = lines.find(l => /Pro.Forma\s+No\.?.*Date\s*:/i.test(l));
-    if (proLine) {
-      const m = proLine.match(/:\s*([0-9]{5,})\s*\//);
-      if (m) invoiceNo = m[1];
-    }
-  }
-  if (invoiceNo) invoiceNo = invoiceNo.split("/")[0].trim();
-
-  // ── Purpose ──
-  const purpose = extractPurpose(lines);
-
-  // ── Amount — ALWAYS from instruction ──
+  // ── Step 5: Amount always from instruction ──
   const amount = parseAmountFromInstruction(instruction);
 
-  // ── Build values ──
-  const clean = s => s ? s.replace(/,\s*$/,"").replace(/\s+/g," ").trim().toUpperCase() : null;
+  // ── Step 6: Build values map ──
+  const clean = s => s && s !== "null" ? s.replace(/\s+/g," ").trim().toUpperCase() : null;
 
   const values = {};
-  if (seller.name)    values["BENEFICIARY NAME"]         = clean(seller.name);
-  if (seller.address) values["BENEFICIARY ADDRESS"]      = clean(seller.address);
-  if (bankName)       values["BENEFICIARY BANK NAME"]    = clean(bankName);
-  if (bankAddress)    values["BENEFICIARY BANK ADDRESS"] = clean(bankAddress);
-  if (accountNo)      values["BENEFICIARY A/C NO"]       = accountNo.trim();
-  if (swiftCode)      values["SWIFT CODE"]               = swiftCode;
-  if (invoiceNo)      values["INVOICE NO"]               = invoiceNo.trim().toUpperCase();
-  if (purpose)        values["PURPOSE"]                  = clean(purpose);
-  if (amount)         values["AMOUNT USD"]               = amount;
+  if (fields.beneficiary_name)    values["BENEFICIARY NAME"]         = clean(fields.beneficiary_name);
+  if (fields.beneficiary_address) values["BENEFICIARY ADDRESS"]      = clean(fields.beneficiary_address);
+  if (fields.bank_name)           values["BENEFICIARY BANK NAME"]    = clean(fields.bank_name);
+  if (fields.bank_address)        values["BENEFICIARY BANK ADDRESS"] = clean(fields.bank_address);
+  if (fields.account_no)          values["BENEFICIARY A/C NO"]       = String(fields.account_no).replace(/\s/g,"").trim();
+  if (fields.swift_code)          values["SWIFT CODE"]               = String(fields.swift_code).replace(/[^A-Z0-9]/gi,"").toUpperCase();
+  if (fields.invoice_no)          values["INVOICE NO"]               = String(fields.invoice_no).trim().toUpperCase();
+  if (fields.purpose)             values["PURPOSE"]                  = clean(fields.purpose);
+  if (amount)                     values["AMOUNT USD"]               = amount;
 
+  // ── Step 7: Fill template or return structured output ──
   if (msgFormat && msgFormat.trim().length > 0) {
     return res.status(200).json({ text: fillTemplate(msgFormat, values).trim() });
   }
