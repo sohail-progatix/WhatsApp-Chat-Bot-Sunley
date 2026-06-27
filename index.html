@@ -43,6 +43,7 @@
     var pdfB64     = s(null);
     var instruction= s("");
     var msgFormat  = s("");
+    var phone      = s("");
     var beneName   = s("");
     var beneAddr   = s("");
     var missingFields = s([]);
@@ -58,6 +59,7 @@
     var setB64=pdfB64[1], b64=pdfB64[0];
     var setInstr=instruction[1], instr=instruction[0];
     var setFmt=msgFormat[1], fmt=msgFormat[0];
+    var setPhone=phone[1], ph=phone[0];
     var setBeneName=beneName[1], bname=beneName[0];
     var setBeneAddr=beneAddr[1], baddr=beneAddr[0];
     var setMissing=missingFields[1], missing=missingFields[0];
@@ -99,6 +101,14 @@
     function copyAll() {
       var all=msgs.filter(function(m){return m.role==="bot";}).map(function(m){return m.text;}).join("\n\n");
       copyText(all,"all");
+    }
+
+    function sendWhatsApp(text) {
+      var number = ph.replace(/[^0-9]/g, "");
+      if (!number) { alert("Please enter a WhatsApp number first."); return; }
+      var encoded = encodeURIComponent(text);
+      var url = "https://wa.me/" + number + "?text=" + encoded;
+      window.open(url, "_blank");
     }
 
     function generate() {
@@ -162,6 +172,22 @@
             // OSITS badge
             e("div",{style:{background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#2e7d32",display:"flex",alignItems:"center",gap:8}},
               "⚡ Powered by OSITS"
+            ),
+
+            // WhatsApp Number
+            e("div",null,
+              e("label",{style:{fontSize:12,fontWeight:700,color:"#555",marginBottom:5,display:"block"}},"📱 RECIPIENT WHATSAPP NUMBER"),
+              e("div",{style:{display:"flex",alignItems:"center",gap:6}},
+                e("span",{style:{background:"#f5f5f5",border:"1.5px solid #ddd",borderRadius:"8px 0 0 8px",padding:"9px 10px",fontSize:13,color:"#666",whiteSpace:"nowrap",borderRight:"none"}},"+"),
+                e("input",{
+                  type:"tel",
+                  value:ph,
+                  onChange:function(ev){setPhone(ev.target.value);},
+                  placeholder:"923001234567 (with country code)",
+                  style:{flex:1,border:"1.5px solid #ddd",borderRadius:"0 8px 8px 0",padding:"9px 10px",fontSize:13,fontFamily:"monospace",width:"100%"}
+                })
+              ),
+              e("div",{style:{fontSize:11,color:"#aaa",marginTop:4}},"Include country code, no + or spaces. e.g. 923001234567")
             ),
 
             // PDF Upload
@@ -268,7 +294,11 @@
                         e("div",{style:{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:4,marginTop:5}},
                           e("span",{style:{fontSize:10.5,color:"#888"}},msg.time),
                           msg.role==="bot"&&e("span",{style:{fontSize:13,color:ACCENT_DARK}},"✓✓"),
-                          msg.role==="bot"&&e("button",{className:"copy-btn",onClick:function(){copyText(msg.text,i);}},copy===i?"✓ copied":"📋 copy")
+                          msg.role==="bot"&&e("button",{className:"copy-btn",onClick:function(){copyText(msg.text,i);}},copy===i?"✓ copied":"📋 copy"),
+                          msg.role==="bot"&&e("button",{
+                            onClick:function(){sendWhatsApp(msg.text);},
+                            style:{background:"#25D366",color:"#fff",border:"none",borderRadius:5,padding:"2px 8px",fontSize:11,cursor:"pointer",marginLeft:4,fontWeight:600}
+                          },"📤 Send")
                         )
                       ),
                       msg.role==="bot"&&e("div",{style:{width:30,height:30,borderRadius:"50%",background:WA_HEADER,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"#fff",flexShrink:0,marginBottom:2}},"🤖")
