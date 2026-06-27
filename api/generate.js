@@ -1,78 +1,4 @@
-const https = require("https");
-const http = require("http");
-
-// Simple fetch helper for Node.js without node-fetch dependency
-function fetchJSON(url, options) {
-  return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const lib = urlObj.protocol === "https:" ? https : http;
-    const reqOptions = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname + urlObj.search,
-      method: options.method || "GET",
-      headers: options.headers || {}
-    };
-    const req = lib.request(reqOptions, (res) => {
-      let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => {
-        try {
-          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: () => JSON.parse(data) });
-        } catch(e) { reject(e); }
-      });
-    });
-    req.on("error", reject);
-    if (options.body) req.write(options.body);
-    req.end();
-  });
-}
-
-// Extract readable text from PDF base64 using simple pattern matching
-function extractTextFromPDFBase64(base64) {
-  try {
-    const buffer = Buffer.from(base64, "base64");
-    const pdfText = buffer.toString("latin1");
-    
-    // Extract text between BT (Begin Text) and ET (End Text) markers in PDF
-    const textChunks = [];
-    const btEtRegex = /BT([\s\S]*?)ET/g;
-    let match;
-    while ((match = btEtRegex.exec(pdfText)) !== null) {
-      const block = match[1];
-      // Extract strings in parentheses
-      const strRegex = /\(([^)]+)\)/g;
-      let strMatch;
-      while ((strMatch = strRegex.exec(block)) !== null) {
-        const str = strMatch[1]
-          .replace(/\\n/g, "\n")
-          .replace(/\\r/g, "\r")
-          .replace(/\\t/g, "\t")
-          .replace(/\\\(/g, "(")
-          .replace(/\\\)/g, ")")
-          .replace(/\\\\/g, "\\")
-          .trim();
-        if (str.length > 1) textChunks.push(str);
-      }
-    }
-
-    // Also try to get text from stream content
-    const streamRegex = /stream([\s\S]*?)endstream/g;
-    while ((match = streamRegex.exec(pdfText)) !== null) {
-      const streamContent = match[1];
-      const strRegex2 = /\(([^)]{2,100})\)/g;
-      let sm;
-      while ((sm = strRegex2.exec(streamContent)) !== null) {
-        const s = sm[1].replace(/[^\x20-\x7E\n\r\t]/g, " ").trim();
-        if (s.length > 2 && /[a-zA-Z0-9]/.test(s)) textChunks.push(s);
-      }
-    }
-
-    const extracted = textChunks.join(" ").replace(/\s+/g, " ").trim();
-    return extracted.length > 100 ? extracted : null;
-  } catch(e) {
-    return null;
-  }
-}
+const pdfParse = require("pdf-parse");
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -91,34 +17,42 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // Extract real text from the PDF
-  const extractedText = extractTextFromPDFBase64(pdfBase64);
-
-  let pdfContent;
-  if (extractedText && extractedText.length > 100) {
-    pdfContent = `EXTRACTED PDF TEXT:\n${extractedText.substring(0, 8000)}`;
-  } else {
-    // Fallback: send raw base64 chunk and ask model to try
-    pdfContent = `PDF BASE64 (extract what you can):\n${pdfBase64.substring(0, 5000)}`;
+  // ── Step 1: Parse PDF properly using pdf-parse ──
+  let pdfText = "";
+  try {
+    const pdfBuffer = Buffer.from(pdfBase64, "base64");
+    const parsed = await pdfParse(pdfBuffer);
+    pdfText = parsed.text || "";
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to parse PDF: " + err.message });
   }
 
+  if (!pdfText || pdfText.trim().length < 30) {
+    return res.status(400).json({ 
+      error: "Could not extract text from this PDF. It may be a scanned image. Please use a text-based PDF." 
+    });
+  }
+
+  // ── Step 2: Build prompt with real extracted text ──
   const prompt = `You are a WhatsApp message generator for business payments.
 
-TASK: Read the PDF content below, extract the real data, and generate a WhatsApp message.
+TASK: Read the PDF text below and generate a WhatsApp message.
 
 STRICT RULES:
-- Use ONLY data found in the PDF below — do NOT invent or assume any values
+- Use ONLY data found in the PDF text below — do NOT invent or assume any values
 - If a message format is provided, fill EVERY field with exact values from the PDF
-- Output ONLY the final WhatsApp message — no commentary, no explanation
-- Do not use placeholder examples like "Sunley Fabrics" or "Barclays Bank" unless they are actually in the PDF
+- Output ONLY the final WhatsApp message — no preamble, no explanation, no markdown
+- Do not make up names, account numbers, or amounts not found in the PDF
 
 INSTRUCTION: ${instruction}
-${msgFormat ? `\nMESSAGE FORMAT TO FILL IN (replace every ... with real PDF data):\n${msgFormat}\n` : ""}
+${msgFormat ? `\nMESSAGE FORMAT TO FILL (replace every ... with real values from PDF):\n${msgFormat}\n` : ""}
 
-${pdfContent}
+PDF TEXT:
+${pdfText.substring(0, 8000)}
 
-Now generate the WhatsApp message using ONLY the real data found above:`;
+Generate the WhatsApp message now using ONLY the real data above:`;
 
+  // ── Step 3: Try free models in order ──
   const models = [
     "openrouter/auto",
     "meta-llama/llama-3.3-70b:free",
@@ -131,7 +65,7 @@ Now generate the WhatsApp message using ONLY the real data found above:`;
 
   for (const model of models) {
     try {
-      const response = await fetchJSON("https://openrouter.ai/api/v1/chat/completions", {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
@@ -140,14 +74,14 @@ Now generate the WhatsApp message using ONLY the real data found above:`;
           "X-Title": "WhatsApp PDF Message Generator"
         },
         body: JSON.stringify({
-          model: model,
+          model,
           messages: [{ role: "user", content: prompt }],
           max_tokens: 1024,
           temperature: 0.1
         })
       });
 
-      const data = response.json();
+      const data = await response.json();
 
       if (!response.ok) {
         lastError = data.error?.message || `Model ${model} failed`;
@@ -157,11 +91,7 @@ Now generate the WhatsApp message using ONLY the real data found above:`;
       const text = data.choices?.[0]?.message?.content || "";
       if (!text) { lastError = "Empty response from " + model; continue; }
 
-      // Return extracted text too so frontend can show debug info
-      res.status(200).json({ 
-        text,
-        extracted_length: extractedText ? extractedText.length : 0
-      });
+      res.status(200).json({ text });
       return;
 
     } catch (err) {
